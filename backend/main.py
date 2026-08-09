@@ -30,17 +30,24 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Configure CORS for React frontend (http://localhost:5173 or http://localhost:3000)
-origins = [
+# Configure CORS for React frontend (local dev & production FRONTEND_URL)
+default_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
 
+frontend_url = os.environ.get("FRONTEND_URL", "").strip()
+if frontend_url:
+    # Ensure no trailing slash for exact CORS matching
+    frontend_url = frontend_url.rstrip("/")
+    if frontend_url not in default_origins:
+        default_origins.append(frontend_url)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=default_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -64,6 +71,11 @@ class ActionRequest(BaseModel):
 @app.get("/")
 def read_root():
     return {"message": "Video-Mind AI FastAPI service is running."}
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
 
 
 @app.post("/api/video/load")
@@ -169,3 +181,10 @@ def key_takeaways_endpoint(req: ActionRequest):
         return {"takeaways": takeaways}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating takeaways: {str(e)}")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
+

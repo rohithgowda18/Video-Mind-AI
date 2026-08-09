@@ -287,7 +287,9 @@ export default function App() {
             <div className="grid md:grid-cols-4 gap-4 mb-8">
               <div className="glass-panel p-5 rounded-xl border border-slate-700/60">
                 <span className="text-xs font-mono uppercase tracking-wider text-slate-400 font-semibold">Backend API</span>
-                <p className="text-sm font-mono text-sky-300 font-bold mt-2">http://localhost:8000</p>
+                <p className="text-sm font-mono text-sky-300 font-bold mt-2 truncate">
+                  {import.meta.env.VITE_API_URL || 'http://localhost:8000'}
+                </p>
               </div>
               <div className="glass-panel p-5 rounded-xl border border-slate-700/60">
                 <span className="text-xs font-mono uppercase tracking-wider text-slate-400 font-semibold">FAISS Indexes</span>
@@ -447,7 +449,7 @@ export default function App() {
                       </div>
                       <div className="flex justify-between">
                         <span>Backend Endpoint:</span>
-                        <span className="text-sky-300 font-mono font-semibold">FastAPI (port 8000)</span>
+                        <span className="text-sky-300 font-mono font-semibold">FastAPI Connected</span>
                       </div>
                     </div>
                   </div>

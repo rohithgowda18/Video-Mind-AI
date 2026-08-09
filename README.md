@@ -1,4 +1,4 @@
-# 🎥 YouTube RAG Chatbot
+# 🎥 Video-Mind AI
 
 > **Ask questions about any YouTube video and get AI-powered answers from its transcript**
 
@@ -21,8 +21,8 @@
 
 ```bash
 # Clone and navigate
-git clone https://github.com/yourusername/YT_chatbot.git
-cd YT_chabot
+git clone https://github.com/rohithgowda18/Video-Mind-AI.git
+cd Video-Mind-AI
 
 # Create virtual environment
 python -m venv venv
@@ -32,10 +32,10 @@ source venv/bin/activate  # Linux/Mac
 # Install dependencies
 pip install -r requirements.txt
 
-# Set up API key
+# Set up API key in .env or Streamlit secrets
 
 # Run the app
-streamlit run ytchat.py
+streamlit run main.py
 ```
 
 ### Usage
@@ -68,8 +68,8 @@ graph LR
 ## 📁 Project Structure
 
 ```
-youtube-rag-chatbot/
-├── 📄 ytchat.py            # Main Streamlit application
+Video-Mind-AI/
+├── 📄 main.py              # Main Streamlit application
 ├── 📄 requirements.txt     # Python dependencies  
 ├── 📄 README.md            # Documentation
 └── 📄 .gitignore           # Git ignore patterns
@@ -98,7 +98,7 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 COPY . .
 EXPOSE 8501
-CMD ["streamlit", "run", "ytchat.py", "--server.port=8501", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "main.py", "--server.port=8501", "--server.address=0.0.0.0"]
 ```
 
 ---
@@ -127,7 +127,7 @@ CMD ["streamlit", "run", "ytchat.py", "--server.port=8501", "--server.address=0.
 ## 👨‍💻 Author
 
 **Rohith Gowda K**
-- GitHub: [@RohithGowdaK](https://github.com/RohithGowdaK)
+- GitHub: [@rohithgowda18](https://github.com/rohithgowda18)
 - Email: rohithgowdak18@gmail.com
 
 ---
@@ -137,3 +137,4 @@ CMD ["streamlit", "run", "ytchat.py", "--server.port=8501", "--server.address=0.
 **⭐ Star this repo if it helped you! ⭐**
 
 </div>
+

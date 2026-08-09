@@ -1,3 +1,7 @@
+# Environment Secrets
+.env
+backend/.env
+
 # Python
 __pycache__/
 *.pyc
@@ -5,10 +9,16 @@ __pycache__/
 *.pyd
 env/
 venv/
-.env
+.venv/
 
-# Streamlit secrets
-.streamlit/secrets.toml
+# Persistent FAISS indexes (keep directory structure via .gitkeep)
+faiss_indexes/*
+!faiss_indexes/.gitkeep
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+node_modules/
 
 # VSCode
 .vscode/

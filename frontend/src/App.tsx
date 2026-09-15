@@ -14,16 +14,35 @@ import {
   Database,
   Zap,
   Loader2,
-  AlertCircle
+  AlertCircle,
+  Network,
+  HelpCircle,
+  Check,
+  X,
+  Gauge
 } from 'lucide-react';
-import { loadVideo, askQuestion, summarizeVideo, getKeyTakeaways } from './services/api';
+import { 
+  loadVideo, 
+  askQuestion, 
+  summarizeVideo, 
+  getKeyTakeaways,
+  getMindmap,
+  getQuiz
+} from './services/api';
+
+declare global {
+  interface Window {
+    mermaid?: any;
+  }
+}
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<'landing' | 'dashboard' | 'workspace' | 'insights'>('landing');
   const [videoUrl, setVideoUrl] = useState('');
   const [loadedVideoId, setLoadedVideoId] = useState<string | null>(null);
   const [videoTitle, setVideoTitle] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'qa' | 'summary' | 'takeaways'>('qa');
+  const [activeTab, setActiveTab] = useState<'qa' | 'summary' | 'takeaways' | 'mindmap' | 'quiz'>('qa');
+  const [playerSeekTime, setPlayerSeekTime] = useState<number>(0);
 
   // Loading and Error States
   const [isLoadingVideo, setIsLoadingVideo] = useState(false);
@@ -32,7 +51,12 @@ export default function App() {
   // Q&A State
   const [question, setQuestion] = useState('');
   const [isAsking, setIsAsking] = useState(false);
-  const [chatMessages, setChatMessages] = useState<Array<{ sender: 'user' | 'ai'; text: string; sources?: Array<{ formatted_timestamp: string; timestamp: number; text: string; url: string }> }>>([]);
+  const [chatMessages, setChatMessages] = useState<Array<{
+    sender: 'user' | 'ai';
+    text: string;
+    sources?: Array<{ formatted_timestamp: string; timestamp: number; text: string; url: string }>;
+    metrics?: { retrieval_ms: number; generation_ms: number; total_ms: number; chunks_retrieved: number };
+  }>>([]);
 
   // Summary State
   const [summaryText, setSummaryText] = useState<string | null>(null);
@@ -43,6 +67,38 @@ export default function App() {
   const [takeawaysList, setTakeawaysList] = useState<string[]>([]);
   const [isGeneratingTakeaways, setIsGeneratingTakeaways] = useState(false);
   const [takeawaysError, setTakeawaysError] = useState<string | null>(null);
+
+  // Mindmap State
+  const [mindmapCode, setMindmapCode] = useState<string | null>(null);
+  const [isGeneratingMindmap, setIsGeneratingMindmap] = useState(false);
+  const [mindmapError, setMindmapError] = useState<string | null>(null);
+
+  // Quiz State
+  const [quizList, setQuizList] = useState<Array<{
+    question: string;
+    options: string[];
+    correct_index: number;
+    explanation: string;
+  }>>([]);
+  const [userAnswers, setUserAnswers] = useState<{ [key: number]: number }>({});
+  const [isGeneratingQuiz, setIsGeneratingQuiz] = useState(false);
+  const [quizError, setQuizError] = useState<string | null>(null);
+
+  const resetStateForNewVideo = () => {
+    setPlayerSeekTime(0);
+    setChatMessages([]);
+    setQuestion('');
+    setSummaryText(null);
+    setSummaryError(null);
+    setTakeawaysList([]);
+    setTakeawaysError(null);
+    setMindmapCode(null);
+    setMindmapError(null);
+    setQuizList([]);
+    setQuizError(null);
+    setUserAnswers({});
+    setActiveTab('qa');
+  };
 
   const handleLoadVideo = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,16 +112,15 @@ export default function App() {
 
     try {
       const res = await loadVideo(videoUrl.trim());
+      resetStateForNewVideo();
       setLoadedVideoId(res.video_id);
       setVideoTitle(res.title || `YouTube Video (${res.video_id})`);
       setChatMessages([
         {
           sender: 'ai',
-          text: `Video loaded successfully! You can now ask questions grounded in this video's transcript.`,
+          text: `Video loaded successfully! You can now ask questions grounded in this video's transcript, view the mindmap, or take a quiz.`,
         }
       ]);
-      setSummaryText(null);
-      setTakeawaysList([]);
       setCurrentPage('workspace');
     } catch (err: any) {
       setVideoError(err.message || 'Unable to process this video.');
@@ -74,23 +129,35 @@ export default function App() {
     }
   };
 
+
   const handleAskQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!question.trim() || !loadedVideoId || isAsking) return;
 
     const userQ = question.trim();
     setQuestion('');
+    
+    // Build conversation history for multi-turn context
+    const historyPayload = chatMessages
+      .filter((m) => m.sender === 'user' || m.sender === 'ai')
+      .slice(-4)
+      .map((m) => ({
+        role: m.sender === 'user' ? ('user' as const) : ('assistant' as const),
+        content: m.text,
+      }));
+
     setChatMessages((prev) => [...prev, { sender: 'user', text: userQ }]);
     setIsAsking(true);
 
     try {
-      const res = await askQuestion(loadedVideoId, userQ);
+      const res = await askQuestion(loadedVideoId, userQ, historyPayload);
       setChatMessages((prev) => [
         ...prev,
         {
           sender: 'ai',
           text: res.answer,
           sources: res.sources,
+          metrics: res.metrics,
         }
       ]);
     } catch (err: any) {
@@ -135,6 +202,48 @@ export default function App() {
       setIsGeneratingTakeaways(false);
     }
   };
+
+  const handleFetchMindmap = async () => {
+    if (!loadedVideoId || isGeneratingMindmap) return;
+    setIsGeneratingMindmap(true);
+    setMindmapError(null);
+
+    try {
+      const res = await getMindmap(loadedVideoId);
+      setMindmapCode(res.mindmap);
+      setTimeout(() => {
+        if (window.mermaid) {
+          try {
+            window.mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+            window.mermaid.run();
+          } catch (e) {
+            console.error('Mermaid render error:', e);
+          }
+        }
+      }, 100);
+    } catch (err: any) {
+      setMindmapError(err.message || 'Unable to generate concept map.');
+    } finally {
+      setIsGeneratingMindmap(false);
+    }
+  };
+
+  const handleFetchQuiz = async () => {
+    if (!loadedVideoId || isGeneratingQuiz) return;
+    setIsGeneratingQuiz(true);
+    setQuizError(null);
+    setUserAnswers({});
+
+    try {
+      const res = await getQuiz(loadedVideoId);
+      setQuizList(res.quiz || []);
+    } catch (err: any) {
+      setQuizError(err.message || 'Unable to generate quiz.');
+    } finally {
+      setIsGeneratingQuiz(false);
+    }
+  };
+
 
   return (
     <div className="min-h-screen bg-[#080B12] text-[#F8FAFC] font-sans flex flex-col antialiased">
@@ -333,8 +442,15 @@ export default function App() {
                           setIsLoadingVideo(true);
                           try {
                             const res = await loadVideo(item.id);
+                            resetStateForNewVideo();
                             setLoadedVideoId(res.video_id);
-                            setVideoTitle(res.title);
+                            setVideoTitle(res.title || `YouTube Video (${res.video_id})`);
+                            setChatMessages([
+                              {
+                                sender: 'ai',
+                                text: `Video loaded successfully! You can now ask questions grounded in this video's transcript, view the mindmap, or take a quiz.`,
+                              }
+                            ]);
                             setCurrentPage('workspace');
                           } catch (err: any) {
                             setVideoError(err.message);
@@ -400,42 +516,71 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      onClick={() => {
+                        resetStateForNewVideo();
+                        setLoadedVideoId(null);
+                        setVideoTitle(null);
+                      }}
+                      className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 transition-all border border-slate-700 cursor-pointer"
+                    >
+                      Change Video
+                    </button>
                     <button 
                       onClick={() => setActiveTab('qa')}
-                      className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${activeTab === 'qa' ? 'bg-sky-400 text-slate-950 shadow-md' : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700'}`}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${activeTab === 'qa' ? 'bg-sky-400 text-slate-950 shadow-md' : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700'}`}
                     >
-                      <MessageSquare className="w-4 h-4" /> Q&A Chat
+                      <MessageSquare className="w-3.5 h-3.5" /> Q&A Chat
                     </button>
                     <button 
                       onClick={() => {
                         setActiveTab('summary');
                         if (!summaryText && !isSummarizing) handleFetchSummary();
                       }}
-                      className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${activeTab === 'summary' ? 'bg-sky-400 text-slate-950 shadow-md' : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700'}`}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${activeTab === 'summary' ? 'bg-sky-400 text-slate-950 shadow-md' : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700'}`}
                     >
-                      <FileText className="w-4 h-4" /> Summary
+                      <FileText className="w-3.5 h-3.5" /> Summary
                     </button>
                     <button 
                       onClick={() => {
                         setActiveTab('takeaways');
                         if (takeawaysList.length === 0 && !isGeneratingTakeaways) handleFetchTakeaways();
                       }}
-                      className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${activeTab === 'takeaways' ? 'bg-sky-400 text-slate-950 shadow-md' : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700'}`}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${activeTab === 'takeaways' ? 'bg-sky-400 text-slate-950 shadow-md' : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700'}`}
                     >
-                      <Lightbulb className="w-4 h-4" /> Key Takeaways
+                      <Lightbulb className="w-3.5 h-3.5" /> Takeaways
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setActiveTab('mindmap');
+                        if (!mindmapCode && !isGeneratingMindmap) handleFetchMindmap();
+                      }}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${activeTab === 'mindmap' ? 'bg-sky-400 text-slate-950 shadow-md' : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700'}`}
+                    >
+                      <Network className="w-3.5 h-3.5" /> Mind Map
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setActiveTab('quiz');
+                        if (quizList.length === 0 && !isGeneratingQuiz) handleFetchQuiz();
+                      }}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${activeTab === 'quiz' ? 'bg-sky-400 text-slate-950 shadow-md' : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700'}`}
+                    >
+                      <HelpCircle className="w-3.5 h-3.5" /> Quiz
                     </button>
                   </div>
                 </div>
 
-                {/* Video Player & Q&A Layout */}
+                {/* Video Player & Dynamic Tabs Layout */}
                 <div className="grid lg:grid-cols-12 gap-6">
-                  {/* Left Column: Embedded YouTube Video */}
+                  {/* Left Column: Embedded YouTube Video with Instant Seek */}
                   <div className="lg:col-span-5 space-y-4">
                     <div className="glass-panel p-2 rounded-2xl border border-slate-700/60 overflow-hidden aspect-video shadow-xl">
                       <iframe
+                        key={`${loadedVideoId}-${playerSeekTime}`}
                         className="w-full h-full rounded-xl"
-                        src={`https://www.youtube.com/embed/${loadedVideoId}`}
+                        src={`https://www.youtube.com/embed/${loadedVideoId}?autoplay=${playerSeekTime > 0 ? 1 : 0}&start=${playerSeekTime}`}
                         title="YouTube Video Player"
                         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                         allowFullScreen
@@ -443,23 +588,33 @@ export default function App() {
                     </div>
 
                     <div className="glass-panel p-4 rounded-xl border border-slate-700/60 text-xs text-slate-300 font-medium space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span>Current Video Seek:</span>
+                        <span className="text-sky-300 font-mono font-bold">
+                          {playerSeekTime > 0 ? `${playerSeekTime}s (Active)` : '0s (Beginning)'}
+                        </span>
+                      </div>
                       <div className="flex justify-between">
                         <span>FAISS Store:</span>
                         <span className="text-emerald-300 font-mono font-bold">faiss_indexes/{loadedVideoId}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span>Backend Endpoint:</span>
-                        <span className="text-sky-300 font-mono font-semibold">FastAPI Connected</span>
+                        <span>Conversational Memory:</span>
+                        <span className="text-purple-300 font-mono font-semibold">Active (Multi-Turn)</span>
                       </div>
                     </div>
                   </div>
 
                   {/* Right Column: Dynamic Tab Content */}
                   <div className="lg:col-span-7">
+                    {/* 1. Q&A Chat Tab */}
                     {activeTab === 'qa' && (
-                      <div className="glass-panel p-6 rounded-2xl border border-slate-700/60 flex flex-col h-[540px] shadow-xl">
-                        <h3 className="text-base font-bold text-white mb-4 flex items-center gap-2">
-                          <MessageSquare className="w-4 h-4 text-sky-400" /> Ask About This Video
+                      <div className="glass-panel p-6 rounded-2xl border border-slate-700/60 flex flex-col h-[560px] shadow-xl">
+                        <h3 className="text-base font-bold text-white mb-3 flex items-center justify-between">
+                          <span className="flex items-center gap-2">
+                            <MessageSquare className="w-4 h-4 text-sky-400" /> Multi-Turn Q&A Chat
+                          </span>
+                          <span className="text-[11px] font-mono text-slate-400 font-normal">Context-Grounded</span>
                         </h3>
 
                         {/* Messages Window */}
@@ -475,22 +630,41 @@ export default function App() {
                                   {msg.text}
                                 </div>
 
+                                {/* AI Performance Metrics Badge */}
+                                {msg.metrics && (
+                                  <div className="mt-1.5 flex items-center gap-2 text-[10px] font-mono text-emerald-400 bg-emerald-950/40 px-2.5 py-1 rounded-md border border-emerald-500/20">
+                                    <Gauge className="w-3 h-3" />
+                                    <span>Retrieval: {msg.metrics.retrieval_ms}ms</span>
+                                    <span>•</span>
+                                    <span>Inference: {msg.metrics.generation_ms}ms</span>
+                                    <span>•</span>
+                                    <span>Top {msg.metrics.chunks_retrieved} Chunks</span>
+                                  </div>
+                                )}
+
+                                {/* Timestamped Sources with In-App Seek Button */}
                                 {msg.sources && msg.sources.length > 0 && (
                                   <div className="mt-3 w-full bg-[#0D1322] p-3.5 rounded-xl border border-slate-700/60 space-y-2.5">
                                     <span className="text-[11px] font-mono uppercase font-bold text-sky-300 tracking-wider flex items-center gap-1.5">
-                                      <Clock className="w-3.5 h-3.5 text-sky-400" /> Timestamped Transcript Sources
+                                      <Clock className="w-3.5 h-3.5 text-sky-400" /> Interactive Citations
                                     </span>
                                     {msg.sources.map((src, sIdx) => (
                                       <div key={sIdx} className="text-xs bg-slate-900/90 p-3 rounded-lg border border-slate-800 flex flex-col gap-1.5">
                                         <div className="flex items-center justify-between">
-                                          <span className="text-sky-300 font-mono font-bold text-[11px]">📍 {src.formatted_timestamp}</span>
+                                          <button
+                                            onClick={() => setPlayerSeekTime(src.timestamp)}
+                                            className="text-sky-300 hover:text-sky-100 font-mono font-bold text-[11px] flex items-center gap-1 cursor-pointer bg-sky-500/20 hover:bg-sky-500/40 px-2 py-0.5 rounded transition-all"
+                                            title="Click to jump video to this second"
+                                          >
+                                            <Play className="w-3 h-3 fill-sky-300" /> Jump to {src.formatted_timestamp}
+                                          </button>
                                           <a
                                             href={src.url}
                                             target="_blank"
                                             rel="noreferrer"
-                                            className="px-2.5 py-1 rounded bg-sky-500/20 text-sky-200 border border-sky-400/30 text-[11px] font-mono font-bold flex items-center gap-1 hover:bg-sky-500/30 transition-all"
+                                            className="px-2 py-0.5 rounded bg-slate-800 text-slate-400 hover:text-white text-[10px] font-mono flex items-center gap-1 transition-all"
                                           >
-                                            Watch at timestamp <ExternalLink className="w-3 h-3" />
+                                            YouTube tab <ExternalLink className="w-2.5 h-2.5" />
                                           </a>
                                         </div>
                                         <p className="text-slate-200 text-xs italic leading-snug">"{src.text}"</p>
@@ -515,7 +689,7 @@ export default function App() {
                             type="text"
                             value={question}
                             onChange={(e) => setQuestion(e.target.value)}
-                            placeholder="Ask a question about this video..."
+                            placeholder="Ask a question (supports follow-ups)..."
                             disabled={isAsking}
                             className="flex-1 bg-[#0F1626] border border-slate-700/80 px-4 py-2.5 rounded-xl text-sm text-white placeholder:text-slate-400 focus:outline-none focus:border-sky-400 font-medium disabled:opacity-50"
                           />
@@ -530,8 +704,9 @@ export default function App() {
                       </div>
                     )}
 
+                    {/* 2. Summary Tab */}
                     {activeTab === 'summary' && (
-                      <div className="glass-panel p-6 rounded-2xl border border-slate-700/60 h-[540px] overflow-y-auto space-y-4 shadow-xl">
+                      <div className="glass-panel p-6 rounded-2xl border border-slate-700/60 h-[560px] overflow-y-auto space-y-4 shadow-xl">
                         <div className="flex items-center justify-between border-b border-slate-700/60 pb-3">
                           <h3 className="text-lg font-bold text-white flex items-center gap-2">
                             <FileText className="w-5 h-5 text-purple-400" /> Video Summary
@@ -561,8 +736,9 @@ export default function App() {
                       </div>
                     )}
 
+                    {/* 3. Takeaways Tab */}
                     {activeTab === 'takeaways' && (
-                      <div className="glass-panel p-6 rounded-2xl border border-slate-700/60 h-[540px] overflow-y-auto space-y-4 shadow-xl">
+                      <div className="glass-panel p-6 rounded-2xl border border-slate-700/60 h-[560px] overflow-y-auto space-y-4 shadow-xl">
                         <div className="flex items-center justify-between border-b border-slate-700/60 pb-3">
                           <h3 className="text-lg font-bold text-white flex items-center gap-2">
                             <Lightbulb className="w-5 h-5 text-amber-400" /> Key Takeaways
@@ -602,12 +778,140 @@ export default function App() {
                         )}
                       </div>
                     )}
+
+                    {/* 4. Mindmap Tab */}
+                    {activeTab === 'mindmap' && (
+                      <div className="glass-panel p-6 rounded-2xl border border-slate-700/60 h-[560px] overflow-y-auto space-y-4 shadow-xl">
+                        <div className="flex items-center justify-between border-b border-slate-700/60 pb-3">
+                          <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                            <Network className="w-5 h-5 text-sky-400" /> Topic & Concept Mind Map
+                          </h3>
+                          <button
+                            onClick={handleFetchMindmap}
+                            disabled={isGeneratingMindmap}
+                            className="px-3.5 py-1.5 rounded-lg bg-sky-500/20 text-sky-200 border border-sky-400/30 text-xs font-semibold hover:bg-sky-500/30 transition-all disabled:opacity-50 cursor-pointer"
+                          >
+                            {isGeneratingMindmap ? 'Generating...' : 'Refresh Mind Map'}
+                          </button>
+                        </div>
+
+                        {isGeneratingMindmap ? (
+                          <div className="flex items-center justify-center py-20 text-sky-300 text-sm font-semibold gap-2">
+                            <Loader2 className="w-5 h-5 animate-spin text-sky-400" /> Structuring conceptual graph with Gemini...
+                          </div>
+                        ) : mindmapError ? (
+                          <div className="p-4 rounded-xl bg-red-950/80 border border-red-500/50 text-red-200 text-sm font-semibold flex items-center gap-2">
+                            <AlertCircle className="w-4 h-4 text-red-400" /> {mindmapError}
+                          </div>
+                        ) : mindmapCode ? (
+                          <div className="space-y-4">
+                            <div className="bg-[#0B101D] p-4 rounded-xl border border-slate-700/70 overflow-x-auto flex justify-center">
+                              <pre className="mermaid text-center font-mono text-xs text-sky-300">
+                                {mindmapCode}
+                              </pre>
+                            </div>
+                            <details className="text-xs text-slate-400">
+                              <summary className="cursor-pointer hover:text-slate-200 font-mono">View Raw Mermaid Syntax</summary>
+                              <pre className="mt-2 p-3 bg-slate-950 rounded-lg text-slate-300 overflow-x-auto font-mono text-[11px]">
+                                {mindmapCode}
+                              </pre>
+                            </details>
+                          </div>
+                        ) : (
+                          <div className="text-center py-16 text-slate-400 text-sm font-medium">
+                            Click 'Refresh Mind Map' to generate a visual hierarchical flowchart of the video concepts.
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* 5. Quiz Tab */}
+                    {activeTab === 'quiz' && (
+                      <div className="glass-panel p-6 rounded-2xl border border-slate-700/60 h-[560px] overflow-y-auto space-y-4 shadow-xl">
+                        <div className="flex items-center justify-between border-b border-slate-700/60 pb-3">
+                          <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                            <HelpCircle className="w-5 h-5 text-emerald-400" /> Video Knowledge Quiz
+                          </h3>
+                          <button
+                            onClick={handleFetchQuiz}
+                            disabled={isGeneratingQuiz}
+                            className="px-3.5 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-200 border border-emerald-400/30 text-xs font-semibold hover:bg-emerald-500/30 transition-all disabled:opacity-50 cursor-pointer"
+                          >
+                            {isGeneratingQuiz ? 'Generating...' : 'Generate New Quiz'}
+                          </button>
+                        </div>
+
+                        {isGeneratingQuiz ? (
+                          <div className="flex items-center justify-center py-20 text-emerald-300 text-sm font-semibold gap-2">
+                            <Loader2 className="w-5 h-5 animate-spin text-emerald-400" /> Formulating quiz questions from transcript...
+                          </div>
+                        ) : quizError ? (
+                          <div className="p-4 rounded-xl bg-red-950/80 border border-red-500/50 text-red-200 text-sm font-semibold flex items-center gap-2">
+                            <AlertCircle className="w-4 h-4 text-red-400" /> {quizError}
+                          </div>
+                        ) : quizList.length > 0 ? (
+                          <div className="space-y-6">
+                            {quizList.map((q, qIdx) => {
+                              const answered = userAnswers[qIdx] !== undefined;
+                              return (
+                                <div key={qIdx} className="bg-[#0F1626] p-4 rounded-xl border border-slate-700/60 space-y-3">
+                                  <p className="text-sm font-bold text-white">
+                                    <span className="text-emerald-400 font-mono mr-2">Q{qIdx + 1}.</span>
+                                    {q.question}
+                                  </p>
+                                  <div className="space-y-2">
+                                    {q.options.map((opt, oIdx) => {
+                                      const isSelected = userAnswers[qIdx] === oIdx;
+                                      const isCorrect = q.correct_index === oIdx;
+                                      let btnStyle = "bg-slate-900 border-slate-700 text-slate-200 hover:border-sky-400";
+                                      if (answered) {
+                                        if (isCorrect) {
+                                          btnStyle = "bg-emerald-950/80 border-emerald-500 text-emerald-200 font-bold";
+                                        } else if (isSelected) {
+                                          btnStyle = "bg-red-950/80 border-red-500 text-red-200";
+                                        } else {
+                                          btnStyle = "bg-slate-900/40 border-slate-800 text-slate-500";
+                                        }
+                                      }
+
+                                      return (
+                                        <button
+                                          key={oIdx}
+                                          disabled={answered}
+                                          onClick={() => setUserAnswers((prev) => ({ ...prev, [qIdx]: oIdx }))}
+                                          className={`w-full p-2.5 rounded-lg border text-left text-xs font-medium transition-all flex items-center justify-between cursor-pointer ${btnStyle}`}
+                                        >
+                                          <span>{opt}</span>
+                                          {answered && isCorrect && <Check className="w-3.5 h-3.5 text-emerald-400" />}
+                                          {answered && isSelected && !isCorrect && <X className="w-3.5 h-3.5 text-red-400" />}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                  {answered && (
+                                    <div className="text-xs bg-slate-950/70 p-2.5 rounded-lg border border-slate-800 text-slate-300">
+                                      <span className="font-bold text-emerald-400">Explanation: </span>
+                                      {q.explanation}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="text-center py-16 text-slate-400 text-sm font-medium">
+                            Click 'Generate New Quiz' to test your comprehension of this video with AI-generated questions.
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               </>
             )}
           </div>
         )}
+
 
         {/* ================= INSIGHTS & SUMMARY PAGE ================= */}
         {currentPage === 'insights' && (

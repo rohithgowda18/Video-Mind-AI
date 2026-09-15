@@ -16,6 +16,8 @@ from rag_pipeline import (
     answer_question,
     summarize_video,
     generate_key_takeaways,
+    generate_mindmap,
+    generate_quiz,
     load_faiss_index,
 )
 
@@ -59,9 +61,15 @@ class LoadVideoRequest(BaseModel):
     url: str = Field(..., description="YouTube video URL or 11-char Video ID")
 
 
+class ChatHistoryMessage(BaseModel):
+    role: str = Field(..., description="'user' or 'assistant'")
+    content: str = Field(..., description="Text content")
+
+
 class AskQuestionRequest(BaseModel):
     video_id: str = Field(..., description="11-char YouTube Video ID")
     question: str = Field(..., description="Question string regarding video transcript")
+    history: Optional[List[ChatHistoryMessage]] = Field(default=None, description="Previous conversation turns")
 
 
 class ActionRequest(BaseModel):
@@ -113,7 +121,7 @@ def load_video(req: LoadVideoRequest):
 
 @app.post("/api/ask")
 def ask_question_endpoint(req: AskQuestionRequest):
-    """Retrieve relevant FAISS chunks and generate transcript-grounded answer with timestamp citations."""
+    """Retrieve relevant FAISS chunks and generate transcript-grounded answer with citations & metrics."""
     if not req.video_id or not req.video_id.strip():
         raise HTTPException(status_code=400, detail="Video ID is required.")
     if not req.question or not req.question.strip():
@@ -130,10 +138,12 @@ def ask_question_endpoint(req: AskQuestionRequest):
             snippets = fetch_transcript(video_id)
             vector_store = build_or_load_faiss_index(snippets, video_id)
 
-        answer, sources = answer_question(vector_store, req.question)
+        history_payload = [m.model_dump() for m in req.history] if req.history else None
+        answer, sources, metrics = answer_question(vector_store, req.question, history_payload)
         return {
             "answer": answer,
             "sources": sources,
+            "metrics": metrics,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating answer: {str(e)}")
@@ -181,6 +191,51 @@ def key_takeaways_endpoint(req: ActionRequest):
         return {"takeaways": takeaways}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating takeaways: {str(e)}")
+
+
+@app.post("/api/mindmap")
+def mindmap_endpoint(req: ActionRequest):
+    """Generate Mermaid.js flowchart code of video concept hierarchy."""
+    if not req.video_id or not req.video_id.strip():
+        raise HTTPException(status_code=400, detail="Video ID is required.")
+
+    video_id = req.video_id.strip()
+    if not validate_video_id(video_id):
+        raise HTTPException(status_code=400, detail="Invalid YouTube Video ID.")
+
+    try:
+        vector_store = load_faiss_index(video_id)
+        if vector_store is None:
+            snippets = fetch_transcript(video_id)
+            vector_store = build_or_load_faiss_index(snippets, video_id)
+
+        mindmap = generate_mindmap(vector_store)
+        return {"mindmap": mindmap}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating mindmap: {str(e)}")
+
+
+@app.post("/api/quiz")
+def quiz_endpoint(req: ActionRequest):
+    """Generate interactive multiple choice quiz questions based on transcript."""
+    if not req.video_id or not req.video_id.strip():
+        raise HTTPException(status_code=400, detail="Video ID is required.")
+
+    video_id = req.video_id.strip()
+    if not validate_video_id(video_id):
+        raise HTTPException(status_code=400, detail="Invalid YouTube Video ID.")
+
+    try:
+        vector_store = load_faiss_index(video_id)
+        if vector_store is None:
+            snippets = fetch_transcript(video_id)
+            vector_store = build_or_load_faiss_index(snippets, video_id)
+
+        quiz = generate_quiz(vector_store)
+        return {"quiz": quiz}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating quiz: {str(e)}")
+
 
 
 if __name__ == "__main__":

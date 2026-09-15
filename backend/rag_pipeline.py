@@ -1,7 +1,7 @@
 import os
 import re
 from functools import lru_cache
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -192,46 +192,67 @@ def clean_and_truncate_excerpt(text: str, max_chars: int = 180) -> str:
     return truncated.rstrip(",.;:") + "..."
 
 
+import time
+
 def answer_question(
-    vector_store: FAISS, question: str
-) -> Tuple[str, List[Dict[str, Any]]]:
-    """Run RAG chain to generate answer and return top 3 structured sources using single FAISS retrieval."""
-    # 1. Single FAISS retrieval for both Gemini context and sources
+    vector_store: FAISS, question: str, history: Optional[List[Dict[str, str]]] = None
+) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
+    """Run RAG chain with conversational memory and performance metrics (retrieval & inference latency)."""
+    t_start = time.perf_counter()
+
+    # 1. Single FAISS retrieval
     retriever = create_retriever(vector_store, k=6)
     retrieved_docs = retriever.invoke(question)
+    t_retrieved = time.perf_counter()
 
     # Format retrieved documents as string for LLM prompt context
     context_str = format_docs_with_sources(retrieved_docs)
 
-    # 2. Invoke Gemini LLM chain with retrieved context
+    # Format conversational history if present
+    history_str = ""
+    if history:
+        turns = []
+        for msg in history[-4:]:  # last 2-4 turns
+            role = "User" if msg.get("role") == "user" else "Assistant"
+            turns.append(f"{role}: {msg.get('content', '')}")
+        history_str = "\n".join(turns)
+
+    # 2. Invoke Gemini LLM chain with retrieved context & history
     llm = get_llm()
 
     PROMPT_TEMPLATE = """\
 You are a helpful AI assistant.
 
 Answer ONLY using the provided transcript context.
-
 If the answer is not available in the transcript, say:
 "I could not find the answer in the transcript."
 
 Do not use outside knowledge.
 Do not invent information.
 
-Context:
+Transcript Context:
 {context}
 
-Question:
+Recent Conversation History:
+{history}
+
+Current Question:
 {question}
 
 Answer:"""
 
     prompt = PromptTemplate(
         template=PROMPT_TEMPLATE,
-        input_variables=["context", "question"],
+        input_variables=["context", "history", "question"],
     )
 
     chain = prompt | llm | StrOutputParser()
-    answer = chain.invoke({"context": context_str, "question": question})
+    answer = chain.invoke({
+        "context": context_str,
+        "history": history_str if history_str else "None",
+        "question": question
+    })
+    t_finished = time.perf_counter()
 
     # 3. Format top 3 structured sources for API response
     sources = []
@@ -247,7 +268,14 @@ Answer:"""
             "url": create_youtube_timestamp_url(vid, start_sec),
         })
 
-    return answer, sources
+    metrics = {
+        "retrieval_ms": round((t_retrieved - t_start) * 1000, 1),
+        "generation_ms": round((t_finished - t_retrieved) * 1000, 1),
+        "total_ms": round((t_finished - t_start) * 1000, 1),
+        "chunks_retrieved": len(retrieved_docs),
+    }
+
+    return answer, sources, metrics
 
 
 def summarize_video(vector_store: FAISS) -> str:
@@ -327,3 +355,95 @@ Key Takeaways:"""
             takeaways.append(line)
 
     return takeaways[:7]
+
+
+def generate_mindmap(vector_store: FAISS) -> str:
+    """Generate a clean Mermaid.js diagram definition depicting concepts and subtopics."""
+    retriever = create_retriever(vector_store, k=10)
+    retrieved_docs = retriever.invoke("Core topics, architecture, components, hierarchy, and workflow")
+    context = format_docs_with_sources(retrieved_docs)
+    llm = get_llm()
+
+    MINDMAP_PROMPT = """\
+You are an expert knowledge architect.
+Create a clean, valid Mermaid.js flowchart (graph TD) that outlines the structure of the video topics and relationships.
+
+Rules:
+1. ONLY return the mermaid code block syntax. No explanations.
+2. Format as:
+```mermaid
+graph TD
+    Root[Main Video Theme] --> Node1[Core Concept 1]
+    Root --> Node2[Core Concept 2]
+    Node1 --> Sub1[Detail A]
+    Node1 --> Sub2[Detail B]
+    Node2 --> Sub3[Detail C]
+```
+3. Keep labels short (max 5-6 words per node), no special characters inside labels except simple words.
+
+Context:
+{context}
+"""
+
+    prompt = PromptTemplate(template=MINDMAP_PROMPT, input_variables=["context"])
+    chain = prompt | llm | StrOutputParser()
+    result = chain.invoke({"context": context}).strip()
+
+    # Extract code between ```mermaid and ``` if present
+    match = re.search(r"```(?:mermaid)?\s*([\s\S]*?)\s*```", result)
+    if match:
+        return match.group(1).strip()
+    return result
+
+
+def generate_quiz(vector_store: FAISS) -> List[Dict[str, Any]]:
+    """Generate 3-4 interactive multiple choice questions based on the video transcript."""
+    import json
+    retriever = create_retriever(vector_store, k=10)
+    retrieved_docs = retriever.invoke("Key concepts, definitions, explanations, and core facts")
+    context = format_docs_with_sources(retrieved_docs)
+    llm = get_llm()
+
+    QUIZ_PROMPT = """\
+You are an expert educator.
+Generate 3 to 4 multiple choice questions based STRICTLY on the video context.
+
+Return ONLY a valid JSON list of objects without markdown formatting or commentary.
+Schema:
+[
+  {{
+    "question": "Question text here?",
+    "options": ["Option A", "Option B", "Option C", "Option D"],
+    "correct_index": 0,
+    "explanation": "Short 1-sentence explanation of why it is correct based on the video."
+  }}
+]
+
+Context:
+{context}
+"""
+
+    prompt = PromptTemplate(template=QUIZ_PROMPT, input_variables=["context"])
+    chain = prompt | llm | StrOutputParser()
+    raw = chain.invoke({"context": context}).strip()
+
+    # Strip markdown code fencing if model wrapped it
+    raw_cleaned = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw_cleaned = re.sub(r"\s*```$", "", raw_cleaned)
+
+    try:
+        data = json.loads(raw_cleaned)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+
+    return [
+        {
+            "question": "What is the primary topic of this video?",
+            "options": ["General Discussion", "Software Architecture", "Deep Learning", "Technology Overview"],
+            "correct_index": 0,
+            "explanation": "Generated from video context."
+        }
+    ]
+

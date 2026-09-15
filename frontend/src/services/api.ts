@@ -37,17 +37,22 @@ export async function loadVideo(url: string) {
 }
 
 /**
- * Ask a question regarding the video transcript
+ * Ask a question regarding the video transcript with conversational history support
  * @param videoId 11-char Video ID
  * @param question Question string
+ * @param history Optional array of previous {role, content} turns
  */
-export async function askQuestion(videoId: string, question: string) {
+export async function askQuestion(
+  videoId: string,
+  question: string,
+  history?: Array<{ role: 'user' | 'assistant'; content: string }>
+) {
   const response = await fetch(`${API_BASE_URL}/ask`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ video_id: videoId, question }),
+    body: JSON.stringify({ video_id: videoId, question, history }),
   });
   return handleResponse(response);
 }
@@ -81,3 +86,34 @@ export async function getKeyTakeaways(videoId: string) {
   });
   return handleResponse(response);
 }
+
+/**
+ * Generate Mermaid.js concept flowchart for the video
+ * @param videoId 11-char Video ID
+ */
+export async function getMindmap(videoId: string) {
+  const response = await fetch(`${API_BASE_URL}/mindmap`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ video_id: videoId }),
+  });
+  return handleResponse(response);
+}
+
+/**
+ * Generate interactive multiple-choice quiz questions
+ * @param videoId 11-char Video ID
+ */
+export async function getQuiz(videoId: string) {
+  const response = await fetch(`${API_BASE_URL}/quiz`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ video_id: videoId }),
+  });
+  return handleResponse(response);
+}
+

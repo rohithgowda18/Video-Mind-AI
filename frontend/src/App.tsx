@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { 
   Play, 
   Sparkles, 
@@ -19,7 +19,8 @@ import {
   HelpCircle,
   Check,
   X,
-  Gauge
+  Gauge,
+  FolderPlus, Pencil, Trash2, Download, Upload
 } from 'lucide-react';
 import { 
   loadVideo, 
@@ -27,7 +28,8 @@ import {
   summarizeVideo, 
   getKeyTakeaways,
   getMindmap,
-  getQuiz
+  getQuiz,
+  getIndexedVideos
 } from './services/api';
 
 declare global {
@@ -37,6 +39,42 @@ declare global {
 }
 
 export default function App() {
+  type LibraryVideo = { id: string; title: string; status: 'ready' | 'indexing' | 'unavailable' };
+  type LibraryFolder = { id: string; name: string; videos: LibraryVideo[]; completedVideoIds: string[] };
+  type DialogState = {
+    kind: 'input' | 'confirm';
+    title: string;
+    message: string;
+    value?: string;
+    placeholder?: string;
+    confirmLabel: string;
+    onConfirm: (value: string) => void;
+  };
+  const readFolders = (): LibraryFolder[] => {
+    try {
+      const raw = localStorage.getItem('video-mind-folders');
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed
+        .filter((folder) => folder && typeof folder.id === 'string' && typeof folder.name === 'string' && Array.isArray(folder.videos))
+        .map((folder) => ({
+          id: folder.id,
+          name: folder.name,
+          completedVideoIds: Array.isArray(folder.completedVideoIds)
+            ? folder.completedVideoIds.filter((id: unknown): id is string => typeof id === 'string')
+            : [],
+          videos: folder.videos.filter((video: unknown) => {
+            const item = video as Partial<LibraryVideo>;
+            return typeof item.id === 'string' && typeof item.title === 'string';
+          }).map((video: Partial<LibraryVideo>) => ({
+            id: video.id as string,
+            title: video.title as string,
+            status: (video.status === 'indexing' || video.status === 'unavailable' ? video.status : 'ready') as LibraryVideo['status'],
+          })),
+        })) : [];
+    } catch {
+      return [];
+    }
+  };
   const [currentPage, setCurrentPage] = useState<'landing' | 'dashboard' | 'workspace' | 'insights'>('landing');
   const [videoUrl, setVideoUrl] = useState('');
   const [loadedVideoId, setLoadedVideoId] = useState<string | null>(null);
@@ -47,6 +85,141 @@ export default function App() {
   // Loading and Error States
   const [isLoadingVideo, setIsLoadingVideo] = useState(false);
   const [videoError, setVideoError] = useState<string | null>(null);
+  const [activeIndexedVideos, setActiveIndexedVideos] = useState<string[]>([]);
+  const [folders, setFolders] = useState<LibraryFolder[]>(readFolders);
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [chatScope, setChatScope] = useState<'video' | 'folder'>('video');
+  const [dialog, setDialog] = useState<DialogState | null>(null);
+  const [dialogValue, setDialogValue] = useState('');
+  const [toast, setToast] = useState<{ kind: 'success' | 'error' | 'info'; message: string } | null>(null);
+  const [indexingFolderId, setIndexingFolderId] = useState<string | null>(null);
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) || null;
+  const activeContextIds = chatScope === 'folder' && selectedFolder
+    ? selectedFolder.videos.map((video) => video.id)
+    : loadedVideoId ? [loadedVideoId] : [];
+  const activeContextTitles = Object.fromEntries(
+    (selectedFolder?.videos || []).map((video) => [video.id, video.title])
+  );
+
+  const persistFolders = (next: LibraryFolder[]) => {
+    setFolders(next);
+    try {
+      localStorage.setItem('video-mind-folders', JSON.stringify(next));
+    } catch {
+      setToast({ kind: 'error', message: 'Your browser could not save the library. Check storage permissions and try again.' });
+    }
+  };
+
+  const showToast = (kind: 'success' | 'error' | 'info', message: string) => {
+    setToast({ kind, message });
+    window.setTimeout(() => setToast((current) => current?.message === message ? null : current), 4500);
+  };
+
+  const exportLibrary = () => {
+    const payload = {
+      schemaVersion: 1,
+      exportedAt: new Date().toISOString(),
+      folders,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `video-mind-library-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    showToast('success', 'Library backup downloaded.');
+  };
+
+  const importLibrary = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      const parsed: unknown = JSON.parse(await file.text());
+      const candidate = parsed && typeof parsed === 'object' && 'folders' in parsed
+        ? (parsed as { folders: unknown }).folders
+        : parsed;
+      if (!Array.isArray(candidate)) throw new Error('The backup does not contain a valid folder list.');
+      const imported = candidate.filter((folder): folder is { id: string; name: string; videos: unknown[] } => {
+        return !!folder && typeof folder === 'object'
+          && typeof (folder as { id?: unknown }).id === 'string'
+          && typeof (folder as { name?: unknown }).name === 'string'
+          && Array.isArray((folder as { videos?: unknown }).videos);
+      }).map((folder) => ({
+        id: folder.id,
+        name: folder.name.trim(),
+        completedVideoIds: [],
+        videos: folder.videos.filter((video): video is LibraryVideo => {
+          if (!video || typeof video !== 'object') return false;
+          const item = video as Partial<LibraryVideo>;
+          return typeof item.id === 'string' && typeof item.title === 'string';
+        }).map((video) => ({
+          id: video.id,
+          title: video.title,
+          status: (video.status === 'indexing' || video.status === 'unavailable' ? video.status : 'ready') as LibraryVideo['status'],
+        })),
+      }));
+      if (imported.length === 0) throw new Error('No valid folders were found in this backup.');
+      const merged = [...folders];
+      imported.forEach((folder) => {
+        const existing = merged.find((item) => item.name.toLowerCase() === folder.name.toLowerCase());
+        if (existing) {
+          const videos = [...existing.videos];
+          folder.videos.forEach((video) => {
+            if (!videos.some((item) => item.id === video.id)) videos.push(video);
+          });
+          existing.videos = videos;
+        } else {
+          merged.push(folder);
+        }
+      });
+      persistFolders(merged);
+      showToast('success', `${imported.length} folder${imported.length === 1 ? '' : 's'} imported.`);
+    } catch (error) {
+      showToast('error', error instanceof Error ? error.message : 'This library backup could not be imported.');
+    }
+  };
+
+  const openInputDialog = (
+    title: string,
+    message: string,
+    initialValue: string,
+    placeholder: string,
+    confirmLabel: string,
+    onConfirm: (value: string) => void,
+  ) => {
+    setDialog({ kind: 'input', title, message, value: initialValue, placeholder, confirmLabel, onConfirm });
+    setDialogValue(initialValue);
+  };
+
+  const openConfirmDialog = (
+    title: string,
+    message: string,
+    confirmLabel: string,
+    onConfirm: () => void,
+  ) => {
+    setDialog({ kind: 'confirm', title, message, confirmLabel, onConfirm: () => onConfirm() });
+  };
+
+  // Auto-fetch stored video IDs when visiting dashboard
+  React.useEffect(() => {
+    if (currentPage === 'dashboard') {
+      getIndexedVideos()
+        .then((res) => {
+          if (res && res.videos) setActiveIndexedVideos(res.videos);
+        })
+        .catch(() => {});
+      // Upgrade legacy ID-only paths when their library folder is known.
+      void Promise.all(
+        folders.flatMap((folder) =>
+          folder.videos.map((video) => loadVideo(video.id, folder.name).catch(() => null))
+        )
+      );
+    }
+  }, [currentPage, folders]);
+
 
   // Q&A State
   const [question, setQuestion] = useState('');
@@ -54,7 +227,7 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState<Array<{
     sender: 'user' | 'ai';
     text: string;
-    sources?: Array<{ formatted_timestamp: string; timestamp: number; text: string; url: string }>;
+    sources?: Array<{ video_id: string; title: string; formatted_timestamp: string; timestamp: number; text: string; url: string }>;
     metrics?: { retrieval_ms: number; generation_ms: number; total_ms: number; chunks_retrieved: number };
   }>>([]);
 
@@ -100,6 +273,98 @@ export default function App() {
     setActiveTab('qa');
   };
 
+  const createFolder = () => {
+    openInputDialog('Create folder', 'Give this learning folder a clear subject name.', '', 'e.g. Java, DBMS, Operating Systems', 'Create folder', (rawName) => {
+      const name = rawName.trim();
+      if (!name) {
+        showToast('error', 'Folder name cannot be empty.');
+        return;
+      }
+      if (folders.some((folder) => folder.name.toLowerCase() === name.toLowerCase())) {
+        showToast('error', 'A folder with this name already exists.');
+        return;
+      }
+      persistFolders([...folders, { id: `${Date.now()}-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, name, videos: [], completedVideoIds: [] }]);
+      showToast('success', `"${name}" folder created.`);
+    });
+  };
+
+  const renameFolder = (folder: LibraryFolder) => {
+    openInputDialog('Rename folder', 'Choose a new name for this learning folder.', folder.name, 'Folder name', 'Save name', (rawName) => {
+      const name = rawName.trim();
+      if (!name) {
+        showToast('error', 'Folder name cannot be empty.');
+        return;
+      }
+      if (folders.some((item) => item.id !== folder.id && item.name.toLowerCase() === name.toLowerCase())) {
+        showToast('error', 'A folder with this name already exists.');
+        return;
+      }
+      persistFolders(folders.map((item) => item.id === folder.id ? { ...item, name } : item));
+      showToast('success', 'Folder renamed.');
+    });
+  };
+
+  const deleteFolder = (folder: LibraryFolder) => {
+    openConfirmDialog('Delete folder?', `"${folder.name}" will be removed from this browser. Its videos and FAISS indexes will remain available.`, 'Delete folder', () => {
+      persistFolders(folders.filter((item) => item.id !== folder.id));
+      if (selectedFolderId === folder.id) {
+        setSelectedFolderId(null);
+        setChatScope('video');
+        resetStateForNewVideo();
+      }
+      showToast('success', 'Folder deleted.');
+    });
+  };
+
+  const addVideoToFolder = async (folder: LibraryFolder) => {
+    openInputDialog('Add video', `Add a YouTube URL or video ID to "${folder.name}". It will be indexed before it becomes searchable.`, '', 'https://youtube.com/watch?v=...', 'Index video', async (rawUrl) => {
+      const url = rawUrl.trim();
+      if (!url) {
+        showToast('error', 'Enter a YouTube URL or video ID.');
+        return;
+      }
+      setVideoError(null);
+      setIndexingFolderId(folder.id);
+      setIsLoadingVideo(true);
+      try {
+        const res = await loadVideo(url, folder.name);
+        if (folder.videos.some((video) => video.id === res.video_id)) {
+          showToast('error', 'This video is already in the folder.');
+          return;
+        }
+        const video = { id: res.video_id, title: res.title || `YouTube Video (${res.video_id})`, status: 'ready' as const };
+        persistFolders(folders.map((item) => item.id === folder.id ? { ...item, videos: [...item.videos, video] } : item));
+        showToast('success', 'Video indexed and added to the folder.');
+      } catch (err: any) {
+        showToast('error', err.message || 'Unable to index this video.');
+      } finally {
+        setIndexingFolderId(null);
+        setIsLoadingVideo(false);
+      }
+    });
+  };
+
+  const openFolder = (folder: LibraryFolder) => {
+    setSelectedFolderId(folder.id);
+    setChatScope('folder');
+    resetStateForNewVideo();
+    const first = folder.videos.find((video) => !folder.completedVideoIds.includes(video.id)) || folder.videos[0];
+    setLoadedVideoId(first?.id || null);
+    setVideoTitle(first?.title || null);
+    setCurrentPage('workspace');
+    if (folder.videos.length > 0) {
+      void Promise.all(folder.videos.map((video) => loadVideo(video.id, folder.name).catch(() => null)));
+    }
+  };
+
+  const toggleVideoComplete = (folder: LibraryFolder, videoId: string) => {
+    const completedVideoIds = folder.completedVideoIds.includes(videoId)
+      ? folder.completedVideoIds.filter((id) => id !== videoId)
+      : [...folder.completedVideoIds, videoId];
+    persistFolders(folders.map((item) => item.id === folder.id ? { ...item, completedVideoIds } : item));
+  };
+
   const handleLoadVideo = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!videoUrl.trim()) {
@@ -132,7 +397,7 @@ export default function App() {
 
   const handleAskQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!question.trim() || !loadedVideoId || isAsking) return;
+    if (!question.trim() || activeContextIds.length === 0 || isAsking) return;
 
     const userQ = question.trim();
     setQuestion('');
@@ -150,7 +415,7 @@ export default function App() {
     setIsAsking(true);
 
     try {
-      const res = await askQuestion(loadedVideoId, userQ, historyPayload);
+      const res = await askQuestion(activeContextIds, userQ, historyPayload, activeContextTitles);
       setChatMessages((prev) => [
         ...prev,
         {
@@ -174,12 +439,12 @@ export default function App() {
   };
 
   const handleFetchSummary = async () => {
-    if (!loadedVideoId || isSummarizing) return;
+    if (activeContextIds.length === 0 || isSummarizing) return;
     setIsSummarizing(true);
     setSummaryError(null);
 
     try {
-      const res = await summarizeVideo(loadedVideoId);
+      const res = await summarizeVideo(activeContextIds, activeContextTitles);
       setSummaryText(res.summary);
     } catch (err: any) {
       setSummaryError(err.message || 'Unable to generate summary.');
@@ -189,12 +454,12 @@ export default function App() {
   };
 
   const handleFetchTakeaways = async () => {
-    if (!loadedVideoId || isGeneratingTakeaways) return;
+    if (activeContextIds.length === 0 || isGeneratingTakeaways) return;
     setIsGeneratingTakeaways(true);
     setTakeawaysError(null);
 
     try {
-      const res = await getKeyTakeaways(loadedVideoId);
+      const res = await getKeyTakeaways(activeContextIds, activeContextTitles);
       setTakeawaysList(res.takeaways || []);
     } catch (err: any) {
       setTakeawaysError(err.message || 'Unable to generate key takeaways.');
@@ -204,12 +469,12 @@ export default function App() {
   };
 
   const handleFetchMindmap = async () => {
-    if (!loadedVideoId || isGeneratingMindmap) return;
+    if (activeContextIds.length === 0 || isGeneratingMindmap) return;
     setIsGeneratingMindmap(true);
     setMindmapError(null);
 
     try {
-      const res = await getMindmap(loadedVideoId);
+      const res = await getMindmap(activeContextIds, activeContextTitles);
       setMindmapCode(res.mindmap);
       setTimeout(() => {
         if (window.mermaid) {
@@ -229,13 +494,13 @@ export default function App() {
   };
 
   const handleFetchQuiz = async () => {
-    if (!loadedVideoId || isGeneratingQuiz) return;
+    if (activeContextIds.length === 0 || isGeneratingQuiz) return;
     setIsGeneratingQuiz(true);
     setQuizError(null);
     setUserAnswers({});
 
     try {
-      const res = await getQuiz(loadedVideoId);
+      const res = await getQuiz(activeContextIds, activeContextTitles);
       setQuizList(res.quiz || []);
     } catch (err: any) {
       setQuizError(err.message || 'Unable to generate quiz.');
@@ -244,9 +509,77 @@ export default function App() {
     }
   };
 
+  const removeVideoFromFolder = (folder: LibraryFolder, video: LibraryVideo) => {
+    openConfirmDialog(
+      'Remove video?',
+      `"${video.title}" will be removed from "${folder.name}". Its FAISS index will not be deleted.`,
+      'Remove video',
+      () => {
+        persistFolders(folders.map((item) => item.id === folder.id
+          ? { ...item, videos: item.videos.filter((entry) => entry.id !== video.id) }
+          : item));
+        if (selectedFolderId === folder.id && loadedVideoId === video.id) {
+          setLoadedVideoId(folder.videos.find((entry) => entry.id !== video.id)?.id || null);
+          setVideoTitle(null);
+          setChatMessages([]);
+        }
+        showToast('success', 'Video removed from the folder. Its index was kept.');
+      },
+    );
+  };
+
 
   return (
     <div className="min-h-screen bg-[#080B12] text-[#F8FAFC] font-sans flex flex-col antialiased">
+      {toast && (
+        <div className={`fixed right-5 top-5 z-[90] max-w-sm rounded-xl border px-4 py-3 shadow-2xl flex items-start gap-3 ${
+          toast.kind === 'error'
+            ? 'bg-red-950 border-red-500/50 text-red-100'
+            : toast.kind === 'success'
+              ? 'bg-emerald-950 border-emerald-500/50 text-emerald-100'
+              : 'bg-sky-950 border-sky-500/50 text-sky-100'
+        }`} role="status">
+          {toast.kind === 'error' ? <AlertCircle className="w-5 h-5 mt-0.5 text-red-300" /> : <CheckCircle2 className="w-5 h-5 mt-0.5 text-emerald-300" />}
+          <span className="text-sm font-semibold leading-relaxed">{toast.message}</span>
+          <button aria-label="Dismiss notification" onClick={() => setToast(null)} className="ml-2 text-slate-300 hover:text-white"><X className="w-4 h-4" /></button>
+        </div>
+      )}
+
+      {dialog && (
+        <div className="fixed inset-0 z-[80] bg-black/70 backdrop-blur-sm flex items-center justify-center px-4" role="dialog" aria-modal="true" aria-labelledby="library-dialog-title">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              dialog.onConfirm(dialog.kind === 'input' ? dialogValue : '');
+              setDialog(null);
+            }}
+            className="w-full max-w-md rounded-2xl bg-[#111827] border border-slate-700 shadow-2xl p-6"
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 id="library-dialog-title" className="text-lg font-bold text-white">{dialog.title}</h2>
+                <p className="text-sm text-slate-300 mt-2 leading-relaxed">{dialog.message}</p>
+              </div>
+              <button type="button" aria-label="Close dialog" onClick={() => setDialog(null)} className="text-slate-400 hover:text-white"><X className="w-5 h-5" /></button>
+            </div>
+            {dialog.kind === 'input' && (
+              <input
+                autoFocus
+                value={dialogValue}
+                onChange={(event) => setDialogValue(event.target.value)}
+                placeholder={dialog.placeholder}
+                className="mt-5 w-full rounded-xl bg-slate-950 border border-slate-700 px-4 py-3 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-400"
+              />
+            )}
+            <div className="flex justify-end gap-3 mt-6">
+              <button type="button" onClick={() => setDialog(null)} className="px-4 py-2 rounded-lg text-sm font-semibold text-slate-300 hover:bg-slate-800">Cancel</button>
+              <button type="submit" className={`px-4 py-2 rounded-lg text-sm font-bold ${dialog.kind === 'confirm' ? 'bg-red-500 text-white hover:bg-red-400' : 'bg-sky-400 text-slate-950 hover:bg-sky-300'}`}>
+                {dialog.confirmLabel}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
       {/* Navigation Header */}
       <header className="sticky top-0 z-50 glass-panel border-b border-slate-700/50 px-6 py-4 flex items-center justify-between shadow-xl">
         <div className="flex items-center gap-3 cursor-pointer" onClick={() => setCurrentPage('landing')}>
@@ -392,6 +725,67 @@ export default function App() {
               </button>
             </div>
 
+            <div className="glass-panel rounded-2xl p-6 border border-slate-700/60 shadow-xl mb-8">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h2 className="text-lg font-bold text-white">Knowledge Library</h2>
+                  <p className="text-xs text-slate-400 mt-1">Organize videos by subject and track what you have finished. Data stays in this browser.</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input ref={importInputRef} type="file" accept="application/json,.json" onChange={importLibrary} className="hidden" />
+                  <button onClick={() => importInputRef.current?.click()} className="px-3 py-2 rounded-lg bg-slate-800 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 hover:bg-slate-700">
+                    <Upload className="w-4 h-4" /> Import
+                  </button>
+                  <button onClick={exportLibrary} disabled={folders.length === 0} className="px-3 py-2 rounded-lg bg-slate-800 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 hover:bg-slate-700 disabled:opacity-40">
+                    <Download className="w-4 h-4" /> Export
+                  </button>
+                  <button onClick={createFolder} className="px-3 py-2 rounded-lg bg-purple-500/20 text-purple-200 border border-purple-400/30 text-xs font-semibold flex items-center gap-2">
+                    <FolderPlus className="w-4 h-4" /> New Folder
+                  </button>
+                </div>
+              </div>
+              {folders.length === 0 ? (
+                <p className="text-sm text-slate-400 py-4">No folders yet. Create one for a subject such as Java or DBMS.</p>
+              ) : (
+                <div className="grid md:grid-cols-2 gap-3">
+                  {folders.map((folder) => (
+                    <div key={folder.id} className="rounded-xl bg-slate-900/70 border border-slate-700 p-4">
+                      <div className="flex items-center justify-between">
+                        <button onClick={() => openFolder(folder)} className="text-left flex-1">
+                          <span className="font-bold text-white">{folder.name}</span>
+                          <span className="block text-xs text-slate-400 mt-1">{folder.videos.length} video{folder.videos.length === 1 ? '' : 's'} · {folder.completedVideoIds.filter((id) => folder.videos.some((video) => video.id === id)).length}/{folder.videos.length} completed</span>
+                        </button>
+                        <div className="flex gap-1">
+                          <button aria-label={`Add video to ${folder.name}`} disabled={indexingFolderId === folder.id} onClick={() => addVideoToFolder(folder)} className="p-2 text-sky-300 hover:bg-sky-500/10 rounded disabled:opacity-50">
+                            {indexingFolderId === folder.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderPlus className="w-4 h-4" />}
+                          </button>
+                          <button aria-label={`Rename ${folder.name}`} onClick={() => renameFolder(folder)} className="p-2 text-slate-300 hover:bg-slate-700 rounded"><Pencil className="w-4 h-4" /></button>
+                          <button aria-label={`Delete ${folder.name}`} onClick={() => deleteFolder(folder)} className="p-2 text-red-300 hover:bg-red-500/10 rounded"><Trash2 className="w-4 h-4" /></button>
+                        </div>
+                      </div>
+                      {folder.videos.length === 0 && <p className="text-xs text-amber-300 mt-3">Empty folder - add a video to use folder AI.</p>}
+                      {folder.videos.map((video) => (
+                        <div key={video.id} className="mt-3 flex items-center justify-between text-xs border-t border-slate-800 pt-2">
+                          <button
+                            aria-label={`${folder.completedVideoIds.includes(video.id) ? 'Mark incomplete' : 'Mark complete'}: ${video.title}`}
+                            onClick={() => toggleVideoComplete(folder, video.id)}
+                            className={`mr-2 w-5 h-5 rounded border flex items-center justify-center ${folder.completedVideoIds.includes(video.id) ? 'bg-emerald-500 border-emerald-400 text-slate-950' : 'border-slate-600 text-transparent hover:border-emerald-400'}`}
+                          >
+                            <Check className="w-3 h-3" />
+                          </button>
+                          <span className={`truncate ${folder.completedVideoIds.includes(video.id) ? 'text-slate-500 line-through' : 'text-slate-300'}`}>{video.title}</span>
+                          <span className={`ml-2 whitespace-nowrap ${video.status === 'ready' ? 'text-emerald-300' : 'text-amber-300'}`}>
+                            {video.status === 'ready' ? 'Ready' : video.status}
+                          </span>
+                          <button onClick={() => removeVideoFromFolder(folder, video)} className="text-red-300 ml-2 hover:text-red-200">Remove</button>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* Metrics */}
             <div className="grid md:grid-cols-4 gap-4 mb-8">
               <div className="glass-panel p-5 rounded-xl border border-slate-700/60">
@@ -416,12 +810,24 @@ export default function App() {
 
             {/* Video Indexes List */}
             <div className="glass-panel rounded-2xl p-6 border border-slate-700/60 shadow-xl">
-              <h2 className="text-lg font-bold text-white mb-4">Sample Active Video Indexes</h2>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-bold text-white">Active Video Indexes in Storage</h2>
+                <span className="text-xs font-mono text-slate-400">
+                  {activeIndexedVideos.length > 0 ? `${activeIndexedVideos.length} Saved on Disk` : 'Checking disk...'}
+                </span>
+              </div>
               <div className="divide-y divide-slate-700/50">
-                {[
-                  { id: 'Gfr50f6ZBvo', title: 'DeepMind AI Research Breakdown', chunks: 142, status: 'Ready' },
-                  { id: 'dQw4w9WgXcQ', title: 'Neural Networks and Self-Attention Explained', chunks: 98, status: 'Ready' }
-                ].map((item) => (
+                {(activeIndexedVideos.length > 0
+                  ? activeIndexedVideos.map((id) => ({
+                      id,
+                      title: id === 'Gfr50f6ZBvo' ? 'DeepMind AI Research Breakdown' : id === 'dQw4w9WgXcQ' ? 'Neural Networks and Self-Attention' : `Cached Video (${id})`,
+                      status: 'Ready on Disk'
+                    }))
+                  : [
+                      { id: 'Gfr50f6ZBvo', title: 'DeepMind AI Research Breakdown', status: 'Ready' },
+                      { id: 'dQw4w9WgXcQ', title: 'Neural Networks and Self-Attention Explained', status: 'Ready' }
+                    ]
+                ).map((item) => (
                   <div key={item.id} className="py-4 flex items-center justify-between">
                     <div className="flex items-center gap-4">
                       <div className="w-12 h-12 rounded-xl bg-slate-800/90 border border-slate-700 flex items-center justify-center text-sky-300 font-mono text-xs">
@@ -429,7 +835,7 @@ export default function App() {
                       </div>
                       <div>
                         <h4 className="text-base font-bold text-white">{item.title}</h4>
-                        <span className="text-xs text-slate-300 font-mono">ID: {item.id} • {item.chunks} Chunks</span>
+                        <span className="text-xs text-slate-300 font-mono">ID: {item.id} • Persisted in faiss_indexes/</span>
                       </div>
                     </div>
 
@@ -478,24 +884,34 @@ export default function App() {
                 <div className="w-12 h-12 rounded-xl bg-sky-500/20 text-sky-300 flex items-center justify-center mx-auto border border-sky-400/30">
                   <Play className="w-6 h-6" />
                 </div>
-                <h3 className="text-xl font-bold text-white">No Video Loaded Yet</h3>
-                <p className="text-sm text-slate-300">Please enter a YouTube URL or Video ID to analyze its transcript.</p>
-                <form onSubmit={handleLoadVideo} className="flex gap-2 pt-2">
-                  <input
-                    type="text"
-                    value={videoUrl}
-                    onChange={(e) => setVideoUrl(e.target.value)}
-                    placeholder="Enter YouTube URL or Video ID..."
-                    className="flex-1 bg-slate-900 border border-slate-700 px-4 py-2.5 rounded-xl text-sm text-white placeholder:text-slate-400 focus:outline-none focus:border-sky-400 font-medium"
-                  />
-                  <button
-                    type="submit"
-                    disabled={isLoadingVideo}
-                    className="px-5 py-2.5 rounded-xl bg-sky-400 text-slate-950 font-bold text-sm hover:bg-sky-300 transition-all flex items-center gap-2 disabled:opacity-50 cursor-pointer"
-                  >
-                    {isLoadingVideo ? <Loader2 className="w-4 h-4 animate-spin text-slate-950" /> : 'Load Video'}
+                <h3 className="text-xl font-bold text-white">{selectedFolder ? `${selectedFolder.name} is empty` : 'No Video Loaded Yet'}</h3>
+                <p className="text-sm text-slate-300">
+                  {selectedFolder
+                    ? 'Add an indexed YouTube video to start asking questions across this folder.'
+                    : 'Please enter a YouTube URL or Video ID to analyze its transcript.'}
+                </p>
+                {selectedFolder ? (
+                  <button onClick={() => addVideoToFolder(selectedFolder)} disabled={isLoadingVideo} className="px-5 py-2.5 rounded-xl bg-sky-400 text-slate-950 font-bold text-sm hover:bg-sky-300 transition-all inline-flex items-center gap-2 disabled:opacity-50">
+                    {isLoadingVideo ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderPlus className="w-4 h-4" />} Add video to folder
                   </button>
-                </form>
+                ) : (
+                  <form onSubmit={handleLoadVideo} className="flex gap-2 pt-2">
+                    <input
+                      type="text"
+                      value={videoUrl}
+                      onChange={(e) => setVideoUrl(e.target.value)}
+                      placeholder="Enter YouTube URL or Video ID..."
+                      className="flex-1 bg-slate-900 border border-slate-700 px-4 py-2.5 rounded-xl text-sm text-white placeholder:text-slate-400 focus:outline-none focus:border-sky-400 font-medium"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isLoadingVideo}
+                      className="px-5 py-2.5 rounded-xl bg-sky-400 text-slate-950 font-bold text-sm hover:bg-sky-300 transition-all flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+                    >
+                      {isLoadingVideo ? <Loader2 className="w-4 h-4 animate-spin text-slate-950" /> : 'Load Video'}
+                    </button>
+                  </form>
+                )}
                 {videoError && (
                   <p className="text-xs text-red-300 font-semibold pt-2 flex items-center justify-center gap-1">
                     <AlertCircle className="w-3.5 h-3.5 text-red-400" /> {videoError}
@@ -517,6 +933,29 @@ export default function App() {
                   </div>
 
                   <div className="flex items-center gap-2 flex-wrap">
+                    {selectedFolder && (
+                      <select
+                        value={chatScope === 'folder' ? 'folder' : loadedVideoId || ''}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setChatMessages([]);
+                          if (value === 'folder') {
+                            setChatScope('folder');
+                            setLoadedVideoId(selectedFolder.videos[0]?.id || null);
+                            setVideoTitle(selectedFolder.videos[0]?.title || null);
+                          } else {
+                            const video = selectedFolder.videos.find((item) => item.id === value);
+                            setChatScope('video');
+                            setLoadedVideoId(value);
+                            setVideoTitle(video?.title || null);
+                          }
+                        }}
+                        className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-white"
+                      >
+                        <option value="folder">Entire Folder ({selectedFolder.videos.length})</option>
+                        {selectedFolder.videos.map((video) => <option key={video.id} value={video.id}>{video.title}</option>)}
+                      </select>
+                    )}
                     <button
                       onClick={() => {
                         resetStateForNewVideo();
@@ -652,7 +1091,11 @@ export default function App() {
                                       <div key={sIdx} className="text-xs bg-slate-900/90 p-3 rounded-lg border border-slate-800 flex flex-col gap-1.5">
                                         <div className="flex items-center justify-between">
                                           <button
-                                            onClick={() => setPlayerSeekTime(src.timestamp)}
+                                            onClick={() => {
+                                              setLoadedVideoId(src.video_id);
+                                              setVideoTitle(src.title);
+                                              setPlayerSeekTime(src.timestamp);
+                                            }}
                                             className="text-sky-300 hover:text-sky-100 font-mono font-bold text-[11px] flex items-center gap-1 cursor-pointer bg-sky-500/20 hover:bg-sky-500/40 px-2 py-0.5 rounded transition-all"
                                             title="Click to jump video to this second"
                                           >

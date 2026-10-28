@@ -1,7 +1,8 @@
 import os
 import re
+import shutil
 from functools import lru_cache
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Union
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -28,7 +29,8 @@ def load_embedding_model() -> HuggingFaceEmbeddings:
 
 
 def create_documents_from_snippets(
-    snippets: List[Dict[str, Any]], video_id: str
+    snippets: List[Dict[str, Any]], video_id: str, video_title: Optional[str] = None,
+    folder_name: Optional[str] = None,
 ) -> List[Document]:
     """
     Combine consecutive YouTube transcript snippets into meaningful chunks (~1200 chars)
@@ -67,6 +69,8 @@ def create_documents_from_snippets(
                 page_content=combined_text,
                 metadata={
                     "video_id": video_id,
+                    "title": video_title or f"YouTube Video ({video_id})",
+                    "folder_name": folder_name or "Uncategorized",
                     "start": start_time,
                     "duration": max(0.0, total_duration),
                 },
@@ -90,36 +94,104 @@ def create_documents_from_snippets(
     return documents
 
 
-def get_faiss_index_path(video_id: str) -> str:
-    """Get the local directory path for storing/loading a video's FAISS index."""
-    return os.path.join(FAISS_INDEXES_DIR, video_id)
+def _safe_path_name(value: str, fallback: str) -> str:
+    """Create a readable, filesystem-safe name without allowing path traversal."""
+    cleaned = re.sub(r"[^\w\s.-]", "", value or "", flags=re.UNICODE)
+    cleaned = re.sub(r"\s+", "-", cleaned.strip())
+    return cleaned[:100].strip(".") or fallback
 
 
-def save_faiss_index(vector_store: FAISS, video_id: str) -> str:
-    """Save FAISS index locally to faiss_indexes/VIDEO_ID/."""
-    index_path = get_faiss_index_path(video_id)
+def get_faiss_index_path(
+    video_id: str, folder_name: Optional[str] = None, video_title: Optional[str] = None
+) -> str:
+    """Return readable folder/video storage path while retaining the stable video ID."""
+    folder = _safe_path_name(folder_name or "Uncategorized", "Uncategorized")
+    title = _safe_path_name(video_title or f"Video-{video_id}", f"Video-{video_id}")
+    return os.path.join(FAISS_INDEXES_DIR, folder, f"{title}__{video_id}")
+
+
+def _is_index_path(path: str) -> bool:
+    return os.path.isfile(os.path.join(path, "index.faiss")) and os.path.isfile(
+        os.path.join(path, "index.pkl")
+    )
+
+
+def find_faiss_index_path(video_id: str) -> Optional[str]:
+    """Find both new hierarchical indexes and legacy ID-only indexes."""
+    legacy_path = os.path.join(FAISS_INDEXES_DIR, video_id)
+    if _is_index_path(legacy_path):
+        return legacy_path
+    if not os.path.isdir(FAISS_INDEXES_DIR):
+        return None
+    suffix = f"__{video_id}"
+    for root, _dirs, _files in os.walk(FAISS_INDEXES_DIR):
+        if os.path.basename(root).endswith(suffix) and _is_index_path(root):
+            return root
+    return None
+
+
+def migrate_faiss_index(
+    video_id: str, folder_name: Optional[str], video_title: Optional[str]
+) -> Optional[str]:
+    """Move a legacy or differently named index into the readable hierarchy."""
+    source = find_faiss_index_path(video_id)
+    target = get_faiss_index_path(video_id, folder_name, video_title)
+    if not source or os.path.abspath(source) == os.path.abspath(target):
+        return source
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    if not os.path.exists(target):
+        shutil.move(source, target)
+        return target
+    return target
+
+
+def save_faiss_index(
+    vector_store: FAISS, video_id: str, folder_name: Optional[str] = None,
+    video_title: Optional[str] = None,
+) -> str:
+    """Save FAISS index under faiss_indexes/FOLDER/VIDEO_TITLE__VIDEO_ID/."""
+    index_path = get_faiss_index_path(video_id, folder_name, video_title)
     os.makedirs(index_path, exist_ok=True)
     vector_store.save_local(index_path)
     return index_path
 
 
-def load_faiss_index(video_id: str) -> FAISS:
-    """Load existing local FAISS index for a given video ID if present."""
-    index_path = get_faiss_index_path(video_id)
-    if os.path.exists(index_path) and os.path.isdir(index_path):
-        index_file = os.path.join(index_path, "index.faiss")
-        if os.path.exists(index_file):
-            embedding = load_embedding_model()
-            return FAISS.load_local(
-                index_path,
-                embedding,
-                allow_dangerous_deserialization=True,
-            )
+def check_faiss_index_exists(video_id: str) -> bool:
+    """Fast check if FAISS index files exist on disk without loading them into memory."""
+    return find_faiss_index_path(video_id) is not None
+
+
+# In-memory LRU-like cache for loaded FAISS instances to avoid re-reading disk on every single question
+_LOADED_VECTOR_STORES: Dict[str, FAISS] = {}
+
+
+def load_faiss_index(video_id: str) -> Optional[FAISS]:
+    """Load existing local FAISS index for a given video ID if present (cached in memory)."""
+    if video_id in _LOADED_VECTOR_STORES:
+        return _LOADED_VECTOR_STORES[video_id]
+
+    index_path = find_faiss_index_path(video_id)
+    if index_path:
+        embedding = load_embedding_model()
+        store = FAISS.load_local(
+            index_path,
+            embedding,
+            allow_dangerous_deserialization=True,
+        )
+        stored_name = os.path.basename(index_path)
+        stored_title = stored_name.rsplit("__", 1)[0] if "__" in stored_name else None
+        stored_folder = os.path.basename(os.path.dirname(index_path))
+        for document in store.docstore._dict.values():
+            document.metadata.setdefault("title", stored_title or f"YouTube Video ({video_id})")
+            document.metadata.setdefault("folder_name", stored_folder)
+        _LOADED_VECTOR_STORES[video_id] = store
+        return store
     return None
 
 
 def build_or_load_faiss_index(
-    snippets: List[Dict[str, Any]], video_id: str
+    snippets: List[Dict[str, Any]], video_id: str, folder_name: Optional[str] = None,
+    video_title: Optional[str] = None,
 ) -> FAISS:
     """Load existing FAISS index from disk or build and save a new index."""
     # 1. Try loading existing local FAISS index
@@ -131,7 +203,7 @@ def build_or_load_faiss_index(
     if not snippets:
         raise ValueError("Cannot build FAISS index without transcript snippets.")
 
-    chunks = create_documents_from_snippets(snippets, video_id)
+    chunks = create_documents_from_snippets(snippets, video_id, video_title, folder_name)
     if not chunks:
         raise ValueError("Failed to generate document chunks from transcript.")
 
@@ -139,7 +211,7 @@ def build_or_load_faiss_index(
     vector_store = FAISS.from_documents(chunks, embedding)
 
     # 3. Save newly created index for future instant reuse
-    save_faiss_index(vector_store, video_id)
+    save_faiss_index(vector_store, video_id, folder_name, video_title)
 
     return vector_store
 
@@ -150,7 +222,9 @@ def format_docs_with_sources(retrieved_docs: List[Document]) -> str:
     for doc in retrieved_docs:
         start_sec = doc.metadata.get("start", 0.0)
         timestamp_str = format_timestamp(start_sec)
-        formatted_chunks.append(f"[{timestamp_str}]\n{doc.page_content}")
+        title = doc.metadata.get("title", "Unknown video")
+        video_id = doc.metadata.get("video_id", "")
+        formatted_chunks.append(f"[{title} | {video_id} | {timestamp_str}]\n{doc.page_content}")
     return "\n\n".join(formatted_chunks)
 
 
@@ -171,6 +245,34 @@ def create_retriever(vector_store: FAISS, k: int = 6):
     return vector_store.as_retriever(
         search_type="similarity", search_kwargs={"k": k}
     )
+
+
+VectorStoreContext = Union[FAISS, List[Tuple[str, FAISS, str]]]
+
+
+def retrieve_context(
+    context: VectorStoreContext, query: str, k_per_video: int = 4, limit: int = 8
+) -> Tuple[List[Document], List[str]]:
+    """Retrieve and rank chunks from one or more existing FAISS stores.
+
+    FAISS scores are distances (lower is more relevant), so candidates are sorted
+    by ascending score. Missing stores are reported to the caller.
+    """
+    if isinstance(context, FAISS):
+        return create_retriever(context, k=limit).invoke(query), []
+
+    candidates: List[Tuple[float, Document]] = []
+    missing: List[str] = []
+    for video_id, store, _title in context:
+        try:
+            for document, score in store.similarity_search_with_score(query, k=k_per_video):
+                document.metadata.setdefault("title", _title)
+                candidates.append((float(score), document))
+        except (AttributeError, ValueError, RuntimeError):
+            missing.append(video_id)
+
+    candidates.sort(key=lambda item: item[0])
+    return [document for _score, document in candidates[:limit]], missing
 
 
 def clean_and_truncate_excerpt(text: str, max_chars: int = 180) -> str:
@@ -195,14 +297,13 @@ def clean_and_truncate_excerpt(text: str, max_chars: int = 180) -> str:
 import time
 
 def answer_question(
-    vector_store: FAISS, question: str, history: Optional[List[Dict[str, str]]] = None
+    vector_store: VectorStoreContext, question: str, history: Optional[List[Dict[str, str]]] = None
 ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
     """Run RAG chain with conversational memory and performance metrics (retrieval & inference latency)."""
     t_start = time.perf_counter()
 
     # 1. Single FAISS retrieval
-    retriever = create_retriever(vector_store, k=6)
-    retrieved_docs = retriever.invoke(question)
+    retrieved_docs, missing_video_ids = retrieve_context(vector_store, question)
     t_retrieved = time.perf_counter()
 
     # Format retrieved documents as string for LLM prompt context
@@ -262,6 +363,8 @@ Answer:"""
         short_excerpt = clean_and_truncate_excerpt(doc.page_content, max_chars=180)
 
         sources.append({
+            "video_id": vid,
+            "title": doc.metadata.get("title", f"YouTube Video ({vid})"),
             "timestamp": int(start_sec),
             "formatted_timestamp": format_timestamp(start_sec),
             "text": short_excerpt,
@@ -273,15 +376,18 @@ Answer:"""
         "generation_ms": round((t_finished - t_retrieved) * 1000, 1),
         "total_ms": round((t_finished - t_start) * 1000, 1),
         "chunks_retrieved": len(retrieved_docs),
+        "missing_video_ids": missing_video_ids,
     }
 
     return answer, sources, metrics
 
 
-def summarize_video(vector_store: FAISS) -> str:
+def summarize_video(vector_store: VectorStoreContext) -> str:
     """Generate a concise, transcript-grounded structured video summary."""
-    retriever = create_retriever(vector_store, k=10)
-    retrieved_docs = retriever.invoke("Overview of main concepts, key points, and overall conclusion of this video")
+    retrieved_docs, _ = retrieve_context(
+        vector_store, "Overview of main concepts, key points, and overall conclusion of this video",
+        k_per_video=5, limit=10,
+    )
 
     context = format_docs_with_sources(retrieved_docs)
     llm = get_llm()
@@ -316,10 +422,12 @@ Summary:"""
     return chain.invoke({"context": context})
 
 
-def generate_key_takeaways(vector_store: FAISS) -> List[str]:
+def generate_key_takeaways(vector_store: VectorStoreContext) -> List[str]:
     """Generate 5–7 short, one-sentence transcript-grounded key takeaways."""
-    retriever = create_retriever(vector_store, k=10)
-    retrieved_docs = retriever.invoke("Important key insights, takeaways, and lessons from the video")
+    retrieved_docs, _ = retrieve_context(
+        vector_store, "Important key insights, takeaways, and lessons from the video",
+        k_per_video=5, limit=10,
+    )
 
     context = format_docs_with_sources(retrieved_docs)
     llm = get_llm()
@@ -357,10 +465,12 @@ Key Takeaways:"""
     return takeaways[:7]
 
 
-def generate_mindmap(vector_store: FAISS) -> str:
+def generate_mindmap(vector_store: VectorStoreContext) -> str:
     """Generate a clean Mermaid.js diagram definition depicting concepts and subtopics."""
-    retriever = create_retriever(vector_store, k=10)
-    retrieved_docs = retriever.invoke("Core topics, architecture, components, hierarchy, and workflow")
+    retrieved_docs, _ = retrieve_context(
+        vector_store, "Core topics, architecture, components, hierarchy, and workflow",
+        k_per_video=5, limit=10,
+    )
     context = format_docs_with_sources(retrieved_docs)
     llm = get_llm()
 
@@ -396,11 +506,13 @@ Context:
     return result
 
 
-def generate_quiz(vector_store: FAISS) -> List[Dict[str, Any]]:
+def generate_quiz(vector_store: VectorStoreContext) -> List[Dict[str, Any]]:
     """Generate 3-4 interactive multiple choice questions based on the video transcript."""
     import json
-    retriever = create_retriever(vector_store, k=10)
-    retrieved_docs = retriever.invoke("Key concepts, definitions, explanations, and core facts")
+    retrieved_docs, _ = retrieve_context(
+        vector_store, "Key concepts, definitions, explanations, and core facts",
+        k_per_video=5, limit=10,
+    )
     context = format_docs_with_sources(retrieved_docs)
     llm = get_llm()
 
@@ -446,4 +558,3 @@ Context:
             "explanation": "Generated from video context."
         }
     ]
-

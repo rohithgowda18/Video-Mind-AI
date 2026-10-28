@@ -22,16 +22,24 @@ async function handleResponse(response: Response) {
 }
 
 /**
+ * Fetch list of video IDs that have stored indexes on disk
+ */
+export async function getIndexedVideos() {
+  const response = await fetch(`${API_BASE_URL}/videos/indexed`);
+  return handleResponse(response);
+}
+
+/**
  * Load YouTube video transcript and build/retrieve FAISS index
  * @param url Video URL or 11-char Video ID
  */
-export async function loadVideo(url: string) {
+export async function loadVideo(url: string, folderName?: string) {
   const response = await fetch(`${API_BASE_URL}/video/load`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, folder_name: folderName }),
   });
   return handleResponse(response);
 }
@@ -43,16 +51,23 @@ export async function loadVideo(url: string) {
  * @param history Optional array of previous {role, content} turns
  */
 export async function askQuestion(
-  videoId: string,
+  videoId: string | string[],
   question: string,
-  history?: Array<{ role: 'user' | 'assistant'; content: string }>
+  history?: Array<{ role: 'user' | 'assistant'; content: string }>,
+  videoTitles?: Record<string, string>
 ) {
   const response = await fetch(`${API_BASE_URL}/ask`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ video_id: videoId, question, history }),
+    body: JSON.stringify({
+      video_id: Array.isArray(videoId) ? undefined : videoId,
+      video_ids: Array.isArray(videoId) ? videoId : undefined,
+      video_titles: videoTitles,
+      question,
+      history,
+    }),
   });
   return handleResponse(response);
 }
@@ -61,13 +76,17 @@ export async function askQuestion(
  * Generate a transcript-grounded summary of the video
  * @param videoId 11-char Video ID
  */
-export async function summarizeVideo(videoId: string) {
+export async function summarizeVideo(videoId: string | string[], videoTitles?: Record<string, string>) {
   const response = await fetch(`${API_BASE_URL}/summarize`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ video_id: videoId }),
+    body: JSON.stringify({
+      video_id: Array.isArray(videoId) ? undefined : videoId,
+      video_ids: Array.isArray(videoId) ? videoId : undefined,
+      video_titles: videoTitles,
+    }),
   });
   return handleResponse(response);
 }
@@ -76,13 +95,17 @@ export async function summarizeVideo(videoId: string) {
  * Generate 5-10 key takeaways from the video context
  * @param videoId 11-char Video ID
  */
-export async function getKeyTakeaways(videoId: string) {
+export async function getKeyTakeaways(videoId: string | string[], videoTitles?: Record<string, string>) {
   const response = await fetch(`${API_BASE_URL}/key-takeaways`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ video_id: videoId }),
+    body: JSON.stringify({
+      video_id: Array.isArray(videoId) ? undefined : videoId,
+      video_ids: Array.isArray(videoId) ? videoId : undefined,
+      video_titles: videoTitles,
+    }),
   });
   return handleResponse(response);
 }
@@ -91,13 +114,17 @@ export async function getKeyTakeaways(videoId: string) {
  * Generate Mermaid.js concept flowchart for the video
  * @param videoId 11-char Video ID
  */
-export async function getMindmap(videoId: string) {
+export async function getMindmap(videoId: string | string[], videoTitles?: Record<string, string>) {
   const response = await fetch(`${API_BASE_URL}/mindmap`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ video_id: videoId }),
+    body: JSON.stringify({
+      video_id: Array.isArray(videoId) ? undefined : videoId,
+      video_ids: Array.isArray(videoId) ? videoId : undefined,
+      video_titles: videoTitles,
+    }),
   });
   return handleResponse(response);
 }
@@ -106,14 +133,17 @@ export async function getMindmap(videoId: string) {
  * Generate interactive multiple-choice quiz questions
  * @param videoId 11-char Video ID
  */
-export async function getQuiz(videoId: string) {
+export async function getQuiz(videoId: string | string[], videoTitles?: Record<string, string>) {
   const response = await fetch(`${API_BASE_URL}/quiz`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ video_id: videoId }),
+    body: JSON.stringify({
+      video_id: Array.isArray(videoId) ? undefined : videoId,
+      video_ids: Array.isArray(videoId) ? videoId : undefined,
+      video_titles: videoTitles,
+    }),
   });
   return handleResponse(response);
 }
-

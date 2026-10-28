@@ -12,7 +12,6 @@ import {
   ArrowRight,
   Shield,
   Database,
-  Zap,
   Loader2,
   AlertCircle,
   Network,
@@ -20,7 +19,8 @@ import {
   Check,
   X,
   Gauge,
-  FolderPlus, Pencil, Trash2, Download, Upload
+  FolderPlus, Pencil, Trash2, Download, Upload, Bookmark, StickyNote, BookOpen,
+  PanelLeft, Home, Library, Menu, Settings2
 } from 'lucide-react';
 import { 
   loadVideo, 
@@ -29,7 +29,8 @@ import {
   getKeyTakeaways,
   getMindmap,
   getQuiz,
-  getIndexedVideos
+  inspectPlaylist,
+  searchTranscript
 } from './services/api';
 
 declare global {
@@ -41,6 +42,8 @@ declare global {
 export default function App() {
   type LibraryVideo = { id: string; title: string; status: 'ready' | 'indexing' | 'unavailable' };
   type LibraryFolder = { id: string; name: string; videos: LibraryVideo[]; completedVideoIds: string[] };
+  type BookmarkItem = { id: string; videoId: string; videoTitle: string; timestamp: number; title: string; note: string; createdAt: string; updatedAt: string };
+  type ProgressItem = { videoId: string; position: number; duration?: number; lastAccessed: string; completed: boolean };
   type DialogState = {
     kind: 'input' | 'confirm';
     title: string;
@@ -81,18 +84,36 @@ export default function App() {
   const [videoTitle, setVideoTitle] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'qa' | 'summary' | 'takeaways' | 'mindmap' | 'quiz'>('qa');
   const [playerSeekTime, setPlayerSeekTime] = useState<number>(0);
+  const playerIframeRef = useRef<HTMLIFrameElement>(null);
+  const lastProgressWriteRef = useRef(0);
 
   // Loading and Error States
   const [isLoadingVideo, setIsLoadingVideo] = useState(false);
   const [videoError, setVideoError] = useState<string | null>(null);
-  const [activeIndexedVideos, setActiveIndexedVideos] = useState<string[]>([]);
   const [folders, setFolders] = useState<LibraryFolder[]>(readFolders);
+  const [bookmarks, setBookmarks] = useState<BookmarkItem[]>(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem('video-mind-bookmarks') || '[]');
+      return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item.id === 'string' && typeof item.videoId === 'string' && Number.isFinite(item.timestamp)) : [];
+    } catch { return []; }
+  });
+  const [progress, setProgress] = useState<Record<string, ProgressItem>>(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem('video-mind-progress') || '{}');
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch { return {}; }
+  });
+  const [librarySearch, setLibrarySearch] = useState('');
+  const [searchResults, setSearchResults] = useState<Array<{ type: string; title: string; text?: string; videoId?: string; timestamp?: number; folder?: string }>>([]);
+  const [isSearchingLibrary, setIsSearchingLibrary] = useState(false);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [chatScope, setChatScope] = useState<'video' | 'folder'>('video');
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [dialogValue, setDialogValue] = useState('');
   const [toast, setToast] = useState<{ kind: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [indexingFolderId, setIndexingFolderId] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
   const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) || null;
   const activeContextIds = chatScope === 'folder' && selectedFolder
@@ -101,6 +122,54 @@ export default function App() {
   const activeContextTitles = Object.fromEntries(
     (selectedFolder?.videos || []).map((video) => [video.id, video.title])
   );
+  const libraryVideos = folders.flatMap((folder) => folder.videos.map((video) => ({ ...video, folderId: folder.id, folderName: folder.name })));
+  const recentVideos = [...libraryVideos].reverse().slice(0, 6);
+  const recentlyWatched = Object.values(progress)
+    .filter((item) => item.lastAccessed)
+    .sort((a, b) => b.lastAccessed.localeCompare(a.lastAccessed))
+    .map((item) => ({ item, video: libraryVideos.find((video) => video.id === item.videoId) }))
+    .filter((entry): entry is { item: ProgressItem; video: typeof libraryVideos[number] } => Boolean(entry.video))
+    .slice(0, 4);
+
+  const sendPlayerCommand = (func: string, args: unknown[] = []) => {
+    playerIframeRef.current?.contentWindow?.postMessage(JSON.stringify({
+      event: 'command',
+      func,
+      args,
+    }), 'https://www.youtube.com');
+  };
+
+  React.useEffect(() => {
+    const handlePlayerMessage = (event: MessageEvent) => {
+      if (event.origin !== 'https://www.youtube.com' || typeof event.data !== 'string') return;
+      try {
+        const payload = JSON.parse(event.data);
+        const info = payload.info;
+        if (!loadedVideoId || !info || typeof info.currentTime !== 'number') return;
+        const currentTime = Math.max(0, Math.floor(info.currentTime));
+        setPlayerSeekTime(currentTime);
+        const ended = info.playerState === 0;
+        const now = Date.now();
+        if (now - lastProgressWriteRef.current < 10000) return;
+        lastProgressWriteRef.current = now;
+        persistProgress({
+          ...progress,
+          [loadedVideoId]: {
+            ...(progress[loadedVideoId] || { videoId: loadedVideoId, completed: false }),
+            videoId: loadedVideoId,
+            position: currentTime,
+            duration: typeof info.duration === 'number' ? info.duration : progress[loadedVideoId]?.duration,
+            lastAccessed: new Date().toISOString(),
+            completed: ended || progress[loadedVideoId]?.completed || false,
+          },
+        });
+      } catch {
+        // Ignore unrelated YouTube postMessage traffic.
+      }
+    };
+    window.addEventListener('message', handlePlayerMessage);
+    return () => window.removeEventListener('message', handlePlayerMessage);
+  }, [loadedVideoId, progress]);
 
   const persistFolders = (next: LibraryFolder[]) => {
     setFolders(next);
@@ -109,6 +178,18 @@ export default function App() {
     } catch {
       setToast({ kind: 'error', message: 'Your browser could not save the library. Check storage permissions and try again.' });
     }
+  };
+
+  const persistBookmarks = (next: BookmarkItem[]) => {
+    setBookmarks(next);
+    try { localStorage.setItem('video-mind-bookmarks', JSON.stringify(next)); }
+    catch { showToast('error', 'Bookmarks could not be saved in this browser.'); }
+  };
+
+  const persistProgress = (next: Record<string, ProgressItem>) => {
+    setProgress(next);
+    try { localStorage.setItem('video-mind-progress', JSON.stringify(next)); }
+    catch { showToast('error', 'Learning progress could not be saved in this browser.'); }
   };
 
   const showToast = (kind: 'success' | 'error' | 'info', message: string) => {
@@ -206,11 +287,6 @@ export default function App() {
   // Auto-fetch stored video IDs when visiting dashboard
   React.useEffect(() => {
     if (currentPage === 'dashboard') {
-      getIndexedVideos()
-        .then((res) => {
-          if (res && res.videos) setActiveIndexedVideos(res.videos);
-        })
-        .catch(() => {});
       // Upgrade legacy ID-only paths when their library folder is known.
       void Promise.all(
         folders.flatMap((folder) =>
@@ -364,6 +440,126 @@ export default function App() {
       : [...folder.completedVideoIds, videoId];
     persistFolders(folders.map((item) => item.id === folder.id ? { ...item, completedVideoIds } : item));
   };
+
+  const openVideoContext = (videoId: string, title: string, timestamp = 0, folderId?: string) => {
+    const folder = folders.find((item) => item.id === folderId || item.videos.some((video) => video.id === videoId));
+    setSelectedFolderId(folder?.id || null);
+    setChatScope('video');
+    resetStateForNewVideo();
+    setLoadedVideoId(videoId);
+    setVideoTitle(title);
+    setPlayerSeekTime(Math.max(0, Math.floor(timestamp)));
+    persistProgress({
+      ...progress,
+      [videoId]: { ...(progress[videoId] || { videoId, position: 0, completed: false }), videoId, position: Math.max(0, Math.floor(timestamp)), lastAccessed: new Date().toISOString() },
+    });
+    setCurrentPage('workspace');
+  };
+
+  const addBookmark = () => {
+    if (!loadedVideoId) return;
+    openInputDialog('Save bookmark', 'Add a short title for this moment. You can add a note in the next step.', '', 'e.g. Important definition', 'Next', (title) => {
+      const now = new Date().toISOString();
+      openInputDialog('Add a note (optional)', 'Capture why this timestamp matters to you.', '', 'Your note', 'Save bookmark', (note) => {
+        const bookmark: BookmarkItem = {
+          id: `${Date.now()}-${loadedVideoId}`,
+          videoId: loadedVideoId,
+          videoTitle: videoTitle || `YouTube Video (${loadedVideoId})`,
+          timestamp: Math.max(0, Math.floor(playerSeekTime)),
+          title: title.trim() || `Bookmark at ${Math.floor(playerSeekTime)}s`,
+          note: note.trim(),
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        persistBookmarks([bookmark, ...bookmarks]);
+        showToast('success', 'Bookmark saved.');
+      });
+    });
+  };
+
+  const editBookmark = (bookmark: BookmarkItem) => {
+    openInputDialog('Edit bookmark', 'Update the bookmark title. Its note and timestamp will be preserved.', bookmark.title, 'Bookmark title', 'Save changes', (title) => {
+      persistBookmarks(bookmarks.map((item) => item.id === bookmark.id
+        ? { ...item, title: title.trim() || item.title, updatedAt: new Date().toISOString() }
+        : item));
+      showToast('success', 'Bookmark updated.');
+    });
+  };
+
+  const moveVideo = (folder: LibraryFolder, videoId: string, direction: -1 | 1) => {
+    const index = folder.videos.findIndex((video) => video.id === videoId);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= folder.videos.length) return;
+    const videos = [...folder.videos];
+    [videos[index], videos[target]] = [videos[target], videos[index]];
+    persistFolders(folders.map((item) => item.id === folder.id ? { ...item, videos } : item));
+  };
+
+  const importPlaylistToFolder = (folder: LibraryFolder) => {
+    openInputDialog('Import YouTube playlist', 'Only public playlists can be inspected. Videos are indexed one at a time and unavailable items are skipped.', '', 'https://youtube.com/playlist?list=...', 'Inspect playlist', async (url) => {
+      try {
+        const result = await inspectPlaylist(url.trim(), 50);
+        const existingIds = new Set(folder.videos.map((video) => video.id));
+        const candidates = result.videos.filter((video: { video_id: string }) => !existingIds.has(video.video_id));
+        let added = 0;
+        const nextVideos = [...folder.videos];
+        for (const candidate of candidates) {
+          try {
+            const loaded = await loadVideo(candidate.video_id, folder.name);
+            nextVideos.push({ id: loaded.video_id, title: loaded.title || candidate.title, status: 'ready' });
+            added += 1;
+          } catch {
+            // Keep importing other public playlist items; failures are reported below.
+          }
+        }
+        persistFolders(folders.map((item) => item.id === folder.id ? { ...item, videos: nextVideos } : item));
+        showToast('success', `Playlist import finished: ${added} added, ${result.videos.length - added} skipped or unavailable.`);
+      } catch (error: any) {
+        showToast('error', error.message || 'Playlist import failed.');
+      }
+    });
+  };
+
+  React.useEffect(() => {
+    if (currentPage !== 'dashboard' || !librarySearch.trim()) {
+      setSearchResults([]);
+      return;
+    }
+    const timer = window.setTimeout(async () => {
+      const query = librarySearch.trim().toLowerCase();
+      const results: Array<{ type: string; title: string; text?: string; videoId?: string; timestamp?: number; folder?: string }> = [];
+      folders.forEach((folder) => {
+        if (folder.name.toLowerCase().includes(query)) results.push({ type: 'Folder', title: folder.name });
+        folder.videos.forEach((video) => {
+          if (video.title.toLowerCase().includes(query) || video.id.toLowerCase().includes(query)) {
+            results.push({ type: 'Video', title: video.title, videoId: video.id, folder: folder.name });
+          }
+        });
+      });
+      bookmarks.forEach((bookmark) => {
+        if (`${bookmark.title} ${bookmark.note} ${bookmark.videoTitle}`.toLowerCase().includes(query)) {
+          results.push({ type: 'Bookmark', title: bookmark.title, text: bookmark.note, videoId: bookmark.videoId, timestamp: bookmark.timestamp });
+        }
+      });
+      setIsSearchingLibrary(true);
+      try {
+        const ids = [...new Set(folders.flatMap((folder) => folder.videos.map((video) => video.id)))];
+        if (ids.length > 0) {
+          const transcript = await searchTranscript(query, ids);
+          transcript.results.forEach((item: { title: string; text: string; video_id: string; timestamp: number }) => {
+            results.push({ type: 'Transcript', title: item.title, text: item.text, videoId: item.video_id, timestamp: item.timestamp });
+          });
+        }
+      } catch {
+        // Metadata results remain useful when transcript indexes are unavailable.
+      } finally {
+        setSearchResults(results.slice(0, 50));
+        setIsSearchingLibrary(false);
+      }
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [librarySearch, currentPage, folders, bookmarks]);
 
   const handleLoadVideo = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -580,19 +776,45 @@ export default function App() {
           </form>
         </div>
       )}
-      {/* Navigation Header */}
-      <header className="sticky top-0 z-50 glass-panel border-b border-slate-700/50 px-6 py-4 flex items-center justify-between shadow-xl">
-        <div className="flex items-center gap-3 cursor-pointer" onClick={() => setCurrentPage('landing')}>
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-sky-400 to-purple-500 flex items-center justify-center text-slate-950 font-bold shadow-lg shadow-sky-500/20">
-            <Sparkles className="w-5 h-5 text-slate-950" />
-          </div>
-          <div>
-            <span className="text-xl font-bold tracking-tight text-gradient">Video-Mind AI</span>
-            <span className="block text-[11px] font-mono font-semibold uppercase tracking-widest text-sky-300">FastAPI & Gemini Platform</span>
-          </div>
+      {/* Application shell */}
+      <button aria-label="Open navigation" onClick={() => setMobileNavOpen(true)} className="fixed left-4 top-4 z-50 rounded-lg border border-slate-700 bg-[#101827] p-2 text-slate-300 shadow-lg md:hidden">
+        <Menu className="h-5 w-5" />
+      </button>
+      <aside className={`fixed inset-y-0 left-0 z-40 flex flex-col border-r border-slate-800 bg-[#0d1421] px-3 py-5 transition-all duration-200 md:translate-x-0 ${mobileNavOpen ? 'translate-x-0' : '-translate-x-full'} ${sidebarCollapsed ? 'w-[76px]' : 'w-[240px]'}`}>
+        <div className={`mb-8 flex items-center ${sidebarCollapsed ? 'justify-center' : 'gap-3 px-2'}`}>
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500 text-white"><Sparkles className="h-4 w-4" /></div>
+          {!sidebarCollapsed && <div><p className="text-sm font-bold tracking-tight text-white">Video-Mind AI</p><p className="text-[10px] uppercase tracking-[0.16em] text-slate-500">Learning workspace</p></div>}
         </div>
+        <nav className="space-y-1">
+          {[
+            { id: 'landing' as const, label: 'Overview', icon: Home },
+            { id: 'dashboard' as const, label: 'Library', icon: Library },
+            { id: 'workspace' as const, label: 'Workspace', icon: Play },
+            { id: 'insights' as const, label: 'Insights', icon: FileText },
+          ].map(({ id, label, icon: Icon }) => (
+            <button key={id} title={sidebarCollapsed ? label : undefined} onClick={() => { setCurrentPage(id); setMobileNavOpen(false); }} className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${currentPage === id ? 'bg-indigo-500/15 text-indigo-300' : 'text-slate-400 hover:bg-slate-800/70 hover:text-slate-100'} ${sidebarCollapsed ? 'justify-center' : ''}`}>
+              <Icon className="h-4 w-4 shrink-0" />{!sidebarCollapsed && label}
+            </button>
+          ))}
+        </nav>
+        <div className="mt-8 border-t border-slate-800 pt-5">
+          {!sidebarCollapsed && <p className="px-3 pb-2 text-[10px] font-semibold uppercase tracking-widest text-slate-600">Your library</p>}
+          <button title={sidebarCollapsed ? 'Bookmarks' : undefined} onClick={() => { setCurrentPage('dashboard'); setLibrarySearch('bookmark'); setMobileNavOpen(false); }} className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-slate-400 hover:bg-slate-800/70 hover:text-slate-100 ${sidebarCollapsed ? 'justify-center' : ''}`}><Bookmark className="h-4 w-4 shrink-0" />{!sidebarCollapsed && 'Bookmarks'}</button>
+          <button title={sidebarCollapsed ? 'Notes' : undefined} onClick={() => { setCurrentPage('dashboard'); setLibrarySearch('note'); setMobileNavOpen(false); }} className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-slate-400 hover:bg-slate-800/70 hover:text-slate-100 ${sidebarCollapsed ? 'justify-center' : ''}`}><StickyNote className="h-4 w-4 shrink-0" />{!sidebarCollapsed && 'Notes'}</button>
+          <button title={sidebarCollapsed ? 'Settings' : undefined} onClick={() => showToast('info', 'Settings will be available when accounts are enabled.')} className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-slate-400 hover:bg-slate-800/70 hover:text-slate-100 ${sidebarCollapsed ? 'justify-center' : ''}`}><Settings2 className="h-4 w-4 shrink-0" />{!sidebarCollapsed && 'Settings'}</button>
+        </div>
+        <button aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} onClick={() => setSidebarCollapsed((value) => !value)} className="mt-auto hidden rounded-lg p-2 text-slate-500 hover:bg-slate-800 hover:text-slate-200 md:block"><PanelLeft className="h-4 w-4" /></button>
+      </aside>
+      {mobileNavOpen && <button aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} className="fixed inset-0 z-30 bg-black/60 md:hidden" />}
+      <header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-slate-800 bg-[#080d16]/95 px-6 backdrop-blur md:ml-0">
+        <div className="pl-10 md:pl-0">
+          <p className="text-xs font-medium text-slate-500">{currentPage === 'dashboard' ? 'Library' : currentPage === 'workspace' ? 'Learning workspace' : currentPage === 'insights' ? 'Insights' : 'Welcome back'}</p>
+          <h1 className="text-sm font-semibold text-slate-100">{selectedFolder?.name || videoTitle || 'Video-Mind AI'}</h1>
+        </div>
+        <button onClick={() => setCurrentPage('dashboard')} className="hidden items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-300 hover:border-indigo-400 hover:text-white sm:flex"><Search className="h-3.5 w-3.5" /> Search library</button>
+      </header>
 
-        <nav className="flex items-center gap-2 bg-[#0F1524] p-1.5 rounded-xl border border-slate-700/60">
+        <nav className="hidden">
           <button 
             onClick={() => setCurrentPage('landing')}
             className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${currentPage === 'landing' ? 'bg-sky-500/20 text-sky-200 border border-sky-400/40 shadow-sm' : 'text-slate-300 hover:text-white hover:bg-slate-800/50'}`}
@@ -618,34 +840,29 @@ export default function App() {
             Insights & Summary
           </button>
         </nav>
-      </header>
 
       {/* Main Content Area */}
-      <main className="flex-1">
+      <main className={`min-h-screen flex-1 transition-[margin] duration-200 md:ml-[240px] ${sidebarCollapsed ? 'md:ml-[76px]' : ''}`}>
         {/* ================= LANDING PAGE ================= */}
         {currentPage === 'landing' && (
           <div className="relative overflow-hidden">
-            {/* Hero Glow */}
-            <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[300px] bg-sky-500/15 blur-[130px] rounded-full pointer-events-none" />
-
-            <div className="max-w-6xl mx-auto px-6 py-20 text-center relative z-10">
-              <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-purple-950/60 border border-purple-400/40 text-purple-200 text-xs font-mono font-semibold mb-6 shadow-sm">
-                <Sparkles className="w-4 h-4 text-purple-300" /> Next-Gen YouTube Video Intelligence
+            <div className="mx-auto max-w-5xl px-4 py-16 text-center sm:px-6">
+              <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-indigo-400/30 bg-indigo-500/10 px-3.5 py-1.5 text-xs font-semibold text-indigo-200">
+                <Sparkles className="h-4 w-4 text-indigo-300" /> Learn from every video
               </div>
 
-              <h1 className="text-5xl md:text-6xl font-extrabold tracking-tight text-white mb-6 leading-tight">
-                Understand Any YouTube Video <br />
-                <span className="text-gradient">Responses Grounded in Transcript Context</span>
+              <h1 className="mb-6 text-4xl font-semibold leading-tight tracking-tight text-white sm:text-5xl">
+                Turn YouTube videos into a <span className="text-indigo-300">personal learning space.</span>
               </h1>
 
-              <p className="text-lg text-slate-300 max-w-2xl mx-auto mb-10 leading-relaxed font-normal">
-                Instantly extract answers, key takeaways, and structured summaries with timestamped transcript sources using Gemini 2.5 Flash & FAISS vector search.
+              <p className="mx-auto mb-10 max-w-2xl text-base leading-relaxed text-slate-400">
+                Organize lessons by subject, ask grounded questions, save important moments and return to your progress whenever you study.
               </p>
 
               {/* URL Input Hero Form */}
               <form onSubmit={handleLoadVideo} className="max-w-2xl mx-auto mb-16">
-                <div className="glass-panel p-2.5 rounded-2xl flex items-center gap-2 border border-sky-400/40 shadow-2xl shadow-sky-500/10">
-                  <div className="pl-4 text-sky-400">
+                <div className="glass-panel flex items-center gap-2 rounded-xl p-2">
+                  <div className="pl-4 text-indigo-300">
                     <Search className="w-5 h-5" />
                   </div>
                   <input
@@ -658,7 +875,7 @@ export default function App() {
                   <button
                     type="submit"
                     disabled={isLoadingVideo}
-                    className="px-6 py-3 rounded-xl bg-gradient-to-r from-sky-400 to-blue-600 text-slate-950 font-bold text-sm hover:opacity-95 transition-all flex items-center gap-2 shadow-lg shadow-sky-500/30 disabled:opacity-50 cursor-pointer"
+                    className="flex items-center gap-2 rounded-lg bg-indigo-500 px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-indigo-400 disabled:opacity-50"
                   >
                     {isLoadingVideo ? (
                       <>
@@ -711,27 +928,28 @@ export default function App() {
 
         {/* ================= DASHBOARD PAGE ================= */}
         {currentPage === 'dashboard' && (
-          <div className="max-w-6xl mx-auto px-6 py-10">
-            <div className="flex items-center justify-between mb-8">
+          <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+            <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
               <div>
-                <h1 className="text-3xl font-bold text-white mb-1">Project Dashboard</h1>
-                <p className="text-sm text-slate-300 font-medium">Overview of active video indexes and processing pipelines</p>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-indigo-300">Your learning library</p>
+                <h1 className="mb-1 text-2xl font-semibold tracking-tight text-white sm:text-3xl">Keep learning, one idea at a time.</h1>
+                <p className="text-sm text-slate-400">Pick up where you left off or organize your next subject.</p>
               </div>
               <button 
                 onClick={() => setCurrentPage('workspace')}
-                className="px-4 py-2.5 rounded-xl bg-sky-400 text-slate-950 font-bold text-sm flex items-center gap-2 hover:bg-sky-300 transition-all shadow-lg shadow-sky-500/20 cursor-pointer"
+                className="flex items-center gap-2 rounded-lg bg-indigo-500 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-indigo-400"
               >
-                <Zap className="w-4 h-4 text-slate-950" /> Open Workspace
+                <Play className="h-4 w-4" /> Open workspace
               </button>
             </div>
 
-            <div className="glass-panel rounded-2xl p-6 border border-slate-700/60 shadow-xl mb-8">
+            <div className="glass-panel mb-8 rounded-2xl p-5 sm:p-6">
               <div className="flex items-center justify-between mb-4">
                 <div>
-                  <h2 className="text-lg font-bold text-white">Knowledge Library</h2>
-                  <p className="text-xs text-slate-400 mt-1">Organize videos by subject and track what you have finished. Data stays in this browser.</p>
+                  <h2 className="text-lg font-semibold text-white">Library</h2>
+                  <p className="mt-1 text-xs text-slate-400">Folders, videos and progress are stored in this browser.</p>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center justify-end gap-2">
                   <input ref={importInputRef} type="file" accept="application/json,.json" onChange={importLibrary} className="hidden" />
                   <button onClick={() => importInputRef.current?.click()} className="px-3 py-2 rounded-lg bg-slate-800 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 hover:bg-slate-700">
                     <Upload className="w-4 h-4" /> Import
@@ -739,11 +957,43 @@ export default function App() {
                   <button onClick={exportLibrary} disabled={folders.length === 0} className="px-3 py-2 rounded-lg bg-slate-800 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 hover:bg-slate-700 disabled:opacity-40">
                     <Download className="w-4 h-4" /> Export
                   </button>
-                  <button onClick={createFolder} className="px-3 py-2 rounded-lg bg-purple-500/20 text-purple-200 border border-purple-400/30 text-xs font-semibold flex items-center gap-2">
-                    <FolderPlus className="w-4 h-4" /> New Folder
+                  <button onClick={createFolder} className="flex items-center gap-2 rounded-lg bg-indigo-500 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-400">
+                    <FolderPlus className="h-4 w-4" /> New folder
                   </button>
                 </div>
               </div>
+              <div className="relative mb-5">
+                <Search className="absolute left-3 top-3 w-4 h-4 text-slate-500" />
+                <input
+                  aria-label="Search library"
+                  value={librarySearch}
+                  onChange={(event) => setLibrarySearch(event.target.value)}
+                  placeholder="Search folders, videos, bookmarks, notes and transcripts..."
+                  className="w-full rounded-xl bg-slate-950 border border-slate-700 pl-10 pr-10 py-3 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-400"
+                />
+                {librarySearch && <button aria-label="Clear library search" onClick={() => setLibrarySearch('')} className="absolute right-3 top-3 text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>}
+              </div>
+              {librarySearch && (
+                <div className="mb-5 rounded-xl border border-slate-700 bg-slate-950/70 divide-y divide-slate-800">
+                  {isSearchingLibrary ? <p className="p-4 text-sm text-slate-400">Searching library and indexed transcripts...</p> : searchResults.length === 0 ? <p className="p-4 text-sm text-slate-400">No matching folders, videos, bookmarks or transcript chunks.</p> : searchResults.map((result, index) => (
+                    <button key={`${result.type}-${result.videoId || result.title}-${index}`} onClick={() => result.videoId && openVideoContext(result.videoId, result.title, result.timestamp || 0)} className="w-full text-left p-3 hover:bg-slate-800/70 flex items-start gap-3">
+                      <span className="text-[10px] uppercase tracking-wide text-sky-300 border border-sky-400/30 rounded px-1.5 py-0.5">{result.type}</span>
+                      <span className="min-w-0"><span className="block text-sm font-semibold text-white truncate">{result.title}</span><span className="block text-xs text-slate-400 truncate">{result.text || result.folder || 'Open result'}</span></span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {Object.values(progress).filter((item) => !item.completed).length > 0 && (
+                <div className="mb-5 rounded-xl border border-indigo-400/20 bg-indigo-500/[0.07] p-4">
+                  <h3 className="flex items-center gap-2 text-sm font-semibold text-indigo-200"><BookOpen className="h-4 w-4" /> Continue learning</h3>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {Object.values(progress).filter((item) => !item.completed).slice(0, 5).map((item) => {
+                      const video = folders.flatMap((folder) => folder.videos).find((entry) => entry.id === item.videoId);
+                      return video ? <button key={item.videoId} onClick={() => openVideoContext(video.id, video.title, item.position)} className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-left hover:border-indigo-400"><span className="block max-w-[220px] truncate text-xs font-semibold text-white">{video.title}</span><span className="text-[11px] text-slate-400">Resume at {Math.floor(item.position)}s</span></button> : null;
+                    })}
+                  </div>
+                </div>
+              )}
               {folders.length === 0 ? (
                 <p className="text-sm text-slate-400 py-4">No folders yet. Create one for a subject such as Java or DBMS.</p>
               ) : (
@@ -759,6 +1009,7 @@ export default function App() {
                           <button aria-label={`Add video to ${folder.name}`} disabled={indexingFolderId === folder.id} onClick={() => addVideoToFolder(folder)} className="p-2 text-sky-300 hover:bg-sky-500/10 rounded disabled:opacity-50">
                             {indexingFolderId === folder.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderPlus className="w-4 h-4" />}
                           </button>
+                          <button aria-label={`Import playlist to ${folder.name}`} onClick={() => importPlaylistToFolder(folder)} className="p-2 text-purple-300 hover:bg-purple-500/10 rounded"><Upload className="w-4 h-4" /></button>
                           <button aria-label={`Rename ${folder.name}`} onClick={() => renameFolder(folder)} className="p-2 text-slate-300 hover:bg-slate-700 rounded"><Pencil className="w-4 h-4" /></button>
                           <button aria-label={`Delete ${folder.name}`} onClick={() => deleteFolder(folder)} className="p-2 text-red-300 hover:bg-red-500/10 rounded"><Trash2 className="w-4 h-4" /></button>
                         </div>
@@ -777,6 +1028,10 @@ export default function App() {
                           <span className={`ml-2 whitespace-nowrap ${video.status === 'ready' ? 'text-emerald-300' : 'text-amber-300'}`}>
                             {video.status === 'ready' ? 'Ready' : video.status}
                           </span>
+                          <span className="ml-2 flex gap-1">
+                            <button aria-label={`Move ${video.title} up`} onClick={() => moveVideo(folder, video.id, -1)} className="text-slate-400 hover:text-white">↑</button>
+                            <button aria-label={`Move ${video.title} down`} onClick={() => moveVideo(folder, video.id, 1)} className="text-slate-400 hover:text-white">↓</button>
+                          </span>
                           <button onClick={() => removeVideoFromFolder(folder, video)} className="text-red-300 ml-2 hover:text-red-200">Remove</button>
                         </div>
                       ))}
@@ -786,99 +1041,33 @@ export default function App() {
               )}
             </div>
 
-            {/* Metrics */}
-            <div className="grid md:grid-cols-4 gap-4 mb-8">
-              <div className="glass-panel p-5 rounded-xl border border-slate-700/60">
-                <span className="text-xs font-mono uppercase tracking-wider text-slate-400 font-semibold">Backend API</span>
-                <p className="text-sm font-mono text-sky-300 font-bold mt-2 truncate">
-                  {import.meta.env.VITE_API_URL || 'http://localhost:8000'}
-                </p>
-              </div>
-              <div className="glass-panel p-5 rounded-xl border border-slate-700/60">
-                <span className="text-xs font-mono uppercase tracking-wider text-slate-400 font-semibold">FAISS Indexes</span>
-                <p className="text-2xl font-bold text-sky-300 mt-1">Local Store</p>
-              </div>
-              <div className="glass-panel p-5 rounded-xl border border-slate-700/60">
-                <span className="text-xs font-mono uppercase tracking-wider text-slate-400 font-semibold">Embedding Model</span>
-                <p className="text-sm font-mono text-purple-300 font-semibold mt-3">all-MiniLM-L6-v2</p>
-              </div>
-              <div className="glass-panel p-5 rounded-xl border border-slate-700/60">
-                <span className="text-xs font-mono uppercase tracking-wider text-slate-400 font-semibold">LLM Engine</span>
-                <p className="text-sm font-mono text-emerald-300 font-semibold mt-3">Gemini 2.5 Flash</p>
-              </div>
-            </div>
-
-            {/* Video Indexes List */}
-            <div className="glass-panel rounded-2xl p-6 border border-slate-700/60 shadow-xl">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-bold text-white">Active Video Indexes in Storage</h2>
-                <span className="text-xs font-mono text-slate-400">
-                  {activeIndexedVideos.length > 0 ? `${activeIndexedVideos.length} Saved on Disk` : 'Checking disk...'}
-                </span>
-              </div>
-              <div className="divide-y divide-slate-700/50">
-                {(activeIndexedVideos.length > 0
-                  ? activeIndexedVideos.map((id) => ({
-                      id,
-                      title: id === 'Gfr50f6ZBvo' ? 'DeepMind AI Research Breakdown' : id === 'dQw4w9WgXcQ' ? 'Neural Networks and Self-Attention' : `Cached Video (${id})`,
-                      status: 'Ready on Disk'
-                    }))
-                  : [
-                      { id: 'Gfr50f6ZBvo', title: 'DeepMind AI Research Breakdown', status: 'Ready' },
-                      { id: 'dQw4w9WgXcQ', title: 'Neural Networks and Self-Attention Explained', status: 'Ready' }
-                    ]
-                ).map((item) => (
-                  <div key={item.id} className="py-4 flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 rounded-xl bg-slate-800/90 border border-slate-700 flex items-center justify-center text-sky-300 font-mono text-xs">
-                        <Play className="w-5 h-5 text-sky-400" />
-                      </div>
-                      <div>
-                        <h4 className="text-base font-bold text-white">{item.title}</h4>
-                        <span className="text-xs text-slate-300 font-mono">ID: {item.id} • Persisted in faiss_indexes/</span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-3">
-                      <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 text-xs font-mono font-semibold">
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> {item.status}
-                      </span>
-                      <button 
-                        onClick={async () => {
-                          setIsLoadingVideo(true);
-                          try {
-                            const res = await loadVideo(item.id);
-                            resetStateForNewVideo();
-                            setLoadedVideoId(res.video_id);
-                            setVideoTitle(res.title || `YouTube Video (${res.video_id})`);
-                            setChatMessages([
-                              {
-                                sender: 'ai',
-                                text: `Video loaded successfully! You can now ask questions grounded in this video's transcript, view the mindmap, or take a quiz.`,
-                              }
-                            ]);
-                            setCurrentPage('workspace');
-                          } catch (err: any) {
-                            setVideoError(err.message);
-                          } finally {
-                            setIsLoadingVideo(false);
-                          }
-                        }}
-                        className="px-3.5 py-1.5 rounded-lg bg-sky-500/20 text-sky-200 border border-sky-400/30 text-xs font-semibold hover:bg-sky-500/30 transition-all cursor-pointer"
-                      >
-                        Load Video
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
+            <div className="grid gap-6 lg:grid-cols-[1.25fr_0.75fr]">
+              <section className="glass-panel rounded-2xl p-5 sm:p-6">
+                <div className="mb-4 flex items-center justify-between">
+                  <div><h2 className="text-lg font-semibold text-white">Recently added</h2><p className="mt-1 text-xs text-slate-400">Jump back into a video from your library.</p></div>
+                  <span className="text-xs text-slate-500">{libraryVideos.length} video{libraryVideos.length === 1 ? '' : 's'}</span>
+                </div>
+                {recentVideos.length === 0 ? <p className="rounded-xl border border-dashed border-slate-700 p-6 text-center text-sm text-slate-500">Your recent videos will appear here.</p> : <div className="divide-y divide-slate-800">{recentVideos.map((video) => {
+                  const item = progress[video.id];
+                  const percent = item?.duration ? Math.min(100, Math.round((item.position / item.duration) * 100)) : 0;
+                  return <button key={`${video.folderId}-${video.id}`} onClick={() => openVideoContext(video.id, video.title, item?.position || 0, video.folderId)} className="flex w-full items-center gap-3 py-3 text-left hover:bg-slate-800/30">
+                    <img src={`https://i.ytimg.com/vi/${video.id}/mqdefault.jpg`} alt="" className="h-14 w-24 rounded-md object-cover" />
+                    <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-slate-100">{video.title}</span><span className="mt-1 block text-xs text-slate-500">{video.folderName} · {video.status === 'ready' ? 'Ready to learn' : video.status}</span>{percent > 0 && <span className="mt-2 block h-1 w-full max-w-48 rounded-full bg-slate-800"><span className="block h-1 rounded-full bg-indigo-400" style={{ width: `${percent}%` }} /></span>}</span>
+                    <ArrowRight className="h-4 w-4 shrink-0 text-slate-600" />
+                  </button>;
+                })}</div>}
+              </section>
+              <section className="glass-panel rounded-2xl p-5 sm:p-6">
+                <div className="mb-4 flex items-center justify-between"><div><h2 className="text-lg font-semibold text-white">Recently watched</h2><p className="mt-1 text-xs text-slate-400">Your latest study sessions.</p></div><Clock className="h-4 w-4 text-slate-500" /></div>
+                {recentlyWatched.length === 0 ? <p className="rounded-xl border border-dashed border-slate-700 p-6 text-center text-sm text-slate-500">Watch a video to build your history.</p> : <div className="space-y-2">{recentlyWatched.map(({ item, video }) => <button key={video.id} onClick={() => openVideoContext(video.id, video.title, item.position, video.folderId)} className="flex w-full items-center gap-3 rounded-lg p-2 text-left hover:bg-slate-800/60"><img src={`https://i.ytimg.com/vi/${video.id}/default.jpg`} alt="" className="h-10 w-16 rounded object-cover" /><span className="min-w-0 flex-1"><span className="block truncate text-sm text-slate-200">{video.title}</span><span className="text-xs text-slate-500">{Math.floor(item.position)}s watched</span></span><ArrowRight className="h-4 w-4 text-slate-600" /></button>)}</div>}
+              </section>
             </div>
           </div>
         )}
 
         {/* ================= WORKSPACE PAGE ================= */}
         {currentPage === 'workspace' && (
-          <div className="max-w-6xl mx-auto px-6 py-8">
+          <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
             {!loadedVideoId ? (
               <div className="glass-panel p-10 rounded-2xl border border-slate-700/60 text-center max-w-xl mx-auto my-12 space-y-4 shadow-xl">
                 <div className="w-12 h-12 rounded-xl bg-sky-500/20 text-sky-300 flex items-center justify-center mx-auto border border-sky-400/30">
@@ -921,14 +1110,14 @@ export default function App() {
             ) : (
               <>
                 {/* Top Bar with loaded video */}
-                <div className="glass-panel p-4 rounded-2xl border border-slate-700/60 mb-6 flex flex-wrap items-center justify-between gap-4 shadow-lg">
+                <div className="glass-panel mb-5 flex flex-wrap items-center justify-between gap-4 rounded-2xl p-4">
                   <div className="flex items-center gap-3">
-                    <div className="px-3 py-1 rounded-lg bg-sky-500/20 border border-sky-400/40 text-sky-300 text-xs font-mono font-bold">
-                      ACTIVE INDEX
+                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-300">
+                      <Play className="h-4 w-4" />
                     </div>
                     <div>
-                      <span className="text-base font-bold text-white block">{videoTitle || `Video (${loadedVideoId})`}</span>
-                      <span className="text-xs font-mono text-slate-300 font-medium">Video ID: `{loadedVideoId}`</span>
+                      <span className="block text-base font-semibold text-white">{videoTitle || `Video (${loadedVideoId})`}</span>
+                      <span className="text-xs text-slate-500">{chatScope === 'folder' && selectedFolder ? `Learning across ${selectedFolder.name}` : 'Single video session'}</span>
                     </div>
                   </div>
 
@@ -968,7 +1157,7 @@ export default function App() {
                     </button>
                     <button 
                       onClick={() => setActiveTab('qa')}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${activeTab === 'qa' ? 'bg-sky-400 text-slate-950 shadow-md' : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700'}`}
+                      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${activeTab === 'qa' ? 'bg-indigo-500 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white'}`}
                     >
                       <MessageSquare className="w-3.5 h-3.5" /> Q&A Chat
                     </button>
@@ -977,7 +1166,7 @@ export default function App() {
                         setActiveTab('summary');
                         if (!summaryText && !isSummarizing) handleFetchSummary();
                       }}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${activeTab === 'summary' ? 'bg-sky-400 text-slate-950 shadow-md' : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700'}`}
+                      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${activeTab === 'summary' ? 'bg-indigo-500 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white'}`}
                     >
                       <FileText className="w-3.5 h-3.5" /> Summary
                     </button>
@@ -986,7 +1175,7 @@ export default function App() {
                         setActiveTab('takeaways');
                         if (takeawaysList.length === 0 && !isGeneratingTakeaways) handleFetchTakeaways();
                       }}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${activeTab === 'takeaways' ? 'bg-sky-400 text-slate-950 shadow-md' : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700'}`}
+                      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${activeTab === 'takeaways' ? 'bg-indigo-500 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white'}`}
                     >
                       <Lightbulb className="w-3.5 h-3.5" /> Takeaways
                     </button>
@@ -995,7 +1184,7 @@ export default function App() {
                         setActiveTab('mindmap');
                         if (!mindmapCode && !isGeneratingMindmap) handleFetchMindmap();
                       }}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${activeTab === 'mindmap' ? 'bg-sky-400 text-slate-950 shadow-md' : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700'}`}
+                      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${activeTab === 'mindmap' ? 'bg-indigo-500 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white'}`}
                     >
                       <Network className="w-3.5 h-3.5" /> Mind Map
                     </button>
@@ -1004,7 +1193,7 @@ export default function App() {
                         setActiveTab('quiz');
                         if (quizList.length === 0 && !isGeneratingQuiz) handleFetchQuiz();
                       }}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${activeTab === 'quiz' ? 'bg-sky-400 text-slate-950 shadow-md' : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-700'}`}
+                      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${activeTab === 'quiz' ? 'bg-indigo-500 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white'}`}
                     >
                       <HelpCircle className="w-3.5 h-3.5" /> Quiz
                     </button>
@@ -1012,14 +1201,15 @@ export default function App() {
                 </div>
 
                 {/* Video Player & Dynamic Tabs Layout */}
-                <div className="grid lg:grid-cols-12 gap-6">
+                <div className="grid gap-6 lg:grid-cols-12">
                   {/* Left Column: Embedded YouTube Video with Instant Seek */}
-                  <div className="lg:col-span-5 space-y-4">
+                  <div className="space-y-4 lg:col-span-7">
                     <div className="glass-panel p-2 rounded-2xl border border-slate-700/60 overflow-hidden aspect-video shadow-xl">
                       <iframe
-                        key={`${loadedVideoId}-${playerSeekTime}`}
+                        ref={playerIframeRef}
+                        key={loadedVideoId}
                         className="w-full h-full rounded-xl"
-                        src={`https://www.youtube.com/embed/${loadedVideoId}?autoplay=${playerSeekTime > 0 ? 1 : 0}&start=${playerSeekTime}`}
+                        src={`https://www.youtube.com/embed/${loadedVideoId}?enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}&autoplay=${playerSeekTime > 0 ? 1 : 0}&start=${playerSeekTime}`}
                         title="YouTube Video Player"
                         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                         allowFullScreen
@@ -1027,33 +1217,50 @@ export default function App() {
                     </div>
 
                     <div className="glass-panel p-4 rounded-xl border border-slate-700/60 text-xs text-slate-300 font-medium space-y-2">
-                      <div className="flex justify-between items-center">
-                        <span>Current Video Seek:</span>
-                        <span className="text-sky-300 font-mono font-bold">
-                          {playerSeekTime > 0 ? `${playerSeekTime}s (Active)` : '0s (Beginning)'}
-                        </span>
+                      <div className="flex items-center justify-between">
+                        <span className="text-slate-400">Current position</span>
+                        <span className="font-mono font-semibold text-indigo-300">{Math.floor(playerSeekTime)}s</span>
                       </div>
-                      <div className="flex justify-between">
-                        <span>FAISS Store:</span>
-                        <span className="text-emerald-300 font-mono font-bold">faiss_indexes/{loadedVideoId}</span>
+                      <div className="flex flex-wrap items-center gap-2 border-t border-slate-800 pt-3">
+                        <label htmlFor="manual-timestamp" className="text-slate-500">Jump to second</label>
+                        <input id="manual-timestamp" type="number" min="0" value={playerSeekTime} onChange={(event) => {
+                          const timestamp = Math.max(0, Number(event.target.value) || 0);
+                          setPlayerSeekTime(timestamp);
+                          sendPlayerCommand('seekTo', [timestamp, true]);
+                        }} className="w-20 rounded bg-slate-950 border border-slate-700 px-2 py-1 text-white" />
+                        <button onClick={addBookmark} className="px-2.5 py-1.5 rounded-lg bg-amber-500/20 text-amber-200 border border-amber-400/30 font-semibold flex items-center gap-1"><Bookmark className="w-3.5 h-3.5" /> Save bookmark</button>
+                        {loadedVideoId && <button onClick={() => persistProgress({ ...progress, [loadedVideoId]: { ...(progress[loadedVideoId] || { videoId: loadedVideoId, position: playerSeekTime }), videoId: loadedVideoId, position: playerSeekTime, lastAccessed: new Date().toISOString(), completed: !progress[loadedVideoId]?.completed } })} className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-200 border border-emerald-400/30 font-semibold">
+                          {progress[loadedVideoId]?.completed ? 'Mark in progress' : 'Mark complete'}
+                        </button>}
                       </div>
-                      <div className="flex justify-between">
-                        <span>Conversational Memory:</span>
-                        <span className="text-purple-300 font-mono font-semibold">Active (Multi-Turn)</span>
+                      <div className="pt-2 border-t border-slate-700/60">
+                        <div className="flex items-center gap-2 text-slate-300 mb-2"><StickyNote className="w-3.5 h-3.5 text-amber-300" /> Saved bookmarks</div>
+                        {bookmarks.filter((bookmark) => bookmark.videoId === loadedVideoId).length === 0 ? <p className="text-slate-500">No bookmarks for this video yet.</p> : bookmarks.filter((bookmark) => bookmark.videoId === loadedVideoId).slice(0, 5).map((bookmark) => (
+                          <div key={bookmark.id} className="flex items-center justify-between gap-2 py-1">
+                            <button onClick={() => {
+                              setPlayerSeekTime(bookmark.timestamp);
+                              sendPlayerCommand('seekTo', [bookmark.timestamp, true]);
+                            }} className="truncate text-left text-sky-300 hover:text-sky-200">{bookmark.title} · {Math.floor(bookmark.timestamp)}s</button>
+                            <span className="flex items-center gap-1">
+                              <button aria-label={`Edit bookmark ${bookmark.title}`} onClick={() => editBookmark(bookmark)} className="text-slate-300 hover:text-white"><Pencil className="w-3.5 h-3.5" /></button>
+                              <button aria-label={`Delete bookmark ${bookmark.title}`} onClick={() => persistBookmarks(bookmarks.filter((item) => item.id !== bookmark.id))} className="text-red-300 hover:text-red-200"><Trash2 className="w-3.5 h-3.5" /></button>
+                            </span>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   </div>
 
                   {/* Right Column: Dynamic Tab Content */}
-                  <div className="lg:col-span-7">
+                  <div className="lg:col-span-5">
                     {/* 1. Q&A Chat Tab */}
                     {activeTab === 'qa' && (
-                      <div className="glass-panel p-6 rounded-2xl border border-slate-700/60 flex flex-col h-[560px] shadow-xl">
+                      <div className="glass-panel flex h-[560px] flex-col rounded-2xl p-5">
                         <h3 className="text-base font-bold text-white mb-3 flex items-center justify-between">
                           <span className="flex items-center gap-2">
-                            <MessageSquare className="w-4 h-4 text-sky-400" /> Multi-Turn Q&A Chat
+                            <MessageSquare className="w-4 h-4 text-indigo-300" /> AI assistant
                           </span>
-                          <span className="text-[11px] font-mono text-slate-400 font-normal">Context-Grounded</span>
+                          <span className="text-[11px] font-medium text-slate-500">{chatScope === 'folder' ? 'Folder context' : 'Video context'}</span>
                         </h3>
 
                         {/* Messages Window */}

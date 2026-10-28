@@ -1,4 +1,7 @@
 import os
+import re
+import urllib.request
+import threading
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +25,7 @@ from rag_pipeline import (
     check_faiss_index_exists,
     migrate_faiss_index,
     find_faiss_index_path,
+    retrieve_context,
 )
 
 # Load environment variables (.env in backend directory or root)
@@ -58,11 +62,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_INDEXING_STATUS: Dict[str, Dict[str, Any]] = {}
+_INDEXING_ACTIVE: set[str] = set()
+_INDEXING_LOCK = threading.Lock()
+
 
 # Request & Response Schemas
 class LoadVideoRequest(BaseModel):
-    url: str = Field(..., description="YouTube video URL or 11-char Video ID")
-    folder_name: Optional[str] = Field(default=None, description="User-facing library folder name")
+    url: str = Field(..., min_length=1, max_length=2048, description="YouTube video URL or 11-char Video ID")
+    folder_name: Optional[str] = Field(default=None, max_length=120, description="User-facing library folder name")
+
+
+class PlaylistImportRequest(BaseModel):
+    url: str = Field(..., min_length=1, max_length=2048)
+    limit: int = Field(default=50, ge=1, le=100)
+
+
+class TranscriptSearchRequest(BaseModel):
+    query: str = Field(..., min_length=2, max_length=500)
+    video_ids: List[str] = Field(..., min_length=1, max_length=100)
 
 
 class ChatHistoryMessage(BaseModel):
@@ -134,6 +152,64 @@ def get_indexed_videos():
     return {"videos": indexes}
 
 
+@app.get("/api/video/status/{video_id}")
+def get_video_status(video_id: str):
+    if not validate_video_id(video_id):
+        raise HTTPException(status_code=400, detail="Invalid YouTube Video ID.")
+    status = _INDEXING_STATUS.get(video_id)
+    if status:
+        return status
+    return {"video_id": video_id, "status": "ready" if check_faiss_index_exists(video_id) else "not_indexed"}
+
+
+@app.post("/api/playlist/inspect")
+def inspect_playlist(req: PlaylistImportRequest):
+    """Extract public playlist video IDs without indexing or calling Gemini."""
+    if "list=" not in req.url:
+        raise HTTPException(status_code=400, detail="Enter a YouTube playlist URL containing a list parameter.")
+    try:
+        request = urllib.request.Request(req.url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            html = response.read().decode("utf-8", errors="ignore")
+        ids = list(dict.fromkeys(re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', html)))[:req.limit]
+        if not ids:
+            raise HTTPException(status_code=422, detail="The playlist is private, unavailable, or could not be read.")
+        return {"videos": [{"video_id": video_id, "title": f"YouTube Video ({video_id})"} for video_id in ids], "limited": len(ids) >= req.limit}
+    except HTTPException:
+        raise
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=502, detail=f"Unable to read this playlist: {error}")
+
+
+@app.post("/api/search/transcript")
+def search_transcript(req: TranscriptSearchRequest):
+    ids = _requested_video_ids(None, req.video_ids)
+    contexts = []
+    missing = []
+    for video_id in ids:
+        store = load_faiss_index(video_id)
+        if store is None:
+            missing.append(video_id)
+        else:
+            contexts.append((video_id, store, f"YouTube Video ({video_id})"))
+    if not contexts:
+        return {"results": [], "missing_video_ids": missing}
+    documents, retrieval_missing = retrieve_context(contexts, req.query, k_per_video=3, limit=20)
+    return {
+        "results": [
+            {
+                "video_id": document.metadata.get("video_id", ""),
+                "title": document.metadata.get("title", "Unknown video"),
+                "timestamp": int(float(document.metadata.get("start", 0))),
+                "text": document.page_content[:300],
+                "url": f"https://www.youtube.com/watch?v={document.metadata.get('video_id', '')}&t={int(float(document.metadata.get('start', 0)))}",
+            }
+            for document in documents
+        ],
+        "missing_video_ids": missing + retrieval_missing,
+    }
+
+
 @app.post("/api/video/load")
 def load_video(req: LoadVideoRequest):
     """Extract Video ID, fetch/load transcript, prepare persistent FAISS index, and return metadata."""
@@ -144,6 +220,11 @@ def load_video(req: LoadVideoRequest):
     if not video_id or not validate_video_id(video_id):
         raise HTTPException(status_code=400, detail="Invalid YouTube URL or Video ID.")
 
+    with _INDEXING_LOCK:
+        if video_id in _INDEXING_ACTIVE:
+            raise HTTPException(status_code=409, detail="This video is already being indexed.")
+        _INDEXING_ACTIVE.add(video_id)
+    _INDEXING_STATUS[video_id] = {"video_id": video_id, "status": "processing"}
     try:
         # Fetch title before choosing a readable persistent path.
         title, thumbnail_url = fetch_video_details(video_id)
@@ -157,6 +238,7 @@ def load_video(req: LoadVideoRequest):
             build_or_load_faiss_index(snippets, video_id, req.folder_name, title)
             index_path = find_faiss_index_path(video_id)
 
+        _INDEXING_STATUS[video_id] = {"video_id": video_id, "status": "ready", "title": title}
         return {
             "success": True,
             "video_id": video_id,
@@ -166,8 +248,19 @@ def load_video(req: LoadVideoRequest):
             "status": "ready",
             "message": "Video processed successfully",
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except (ValueError, RuntimeError) as error:
+        message = str(error)
+        _INDEXING_STATUS[video_id] = {"video_id": video_id, "status": "failed", "message": message}
+        raise HTTPException(status_code=422, detail=message)
+    except OSError:
+        _INDEXING_STATUS[video_id] = {"video_id": video_id, "status": "failed", "message": "Storage is unavailable."}
+        raise HTTPException(status_code=503, detail="Index storage is temporarily unavailable.")
+    except Exception:
+        _INDEXING_STATUS[video_id] = {"video_id": video_id, "status": "failed", "message": "Video processing failed."}
+        raise HTTPException(status_code=500, detail="Video processing failed. Please retry.")
+    finally:
+        with _INDEXING_LOCK:
+            _INDEXING_ACTIVE.discard(video_id)
 
 
 @app.post("/api/ask")

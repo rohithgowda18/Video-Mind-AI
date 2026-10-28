@@ -29,6 +29,29 @@ export async function getIndexedVideos() {
   return handleResponse(response);
 }
 
+export async function inspectPlaylist(url: string, limit = 50) {
+  const response = await fetch(`${API_BASE_URL}/playlist/inspect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, limit }),
+  });
+  return handleResponse(response);
+}
+
+export async function getVideoStatus(videoId: string) {
+  const response = await fetch(`${API_BASE_URL}/video/status/${encodeURIComponent(videoId)}`);
+  return handleResponse(response);
+}
+
+export async function searchTranscript(query: string, videoIds: string[]) {
+  const response = await fetch(`${API_BASE_URL}/search/transcript`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, video_ids: videoIds }),
+  });
+  return handleResponse(response);
+}
+
 /**
  * Load YouTube video transcript and build/retrieve FAISS index
  * @param url Video URL or 11-char Video ID

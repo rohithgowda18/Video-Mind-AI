@@ -212,7 +212,15 @@ def inspect_playlist(req: PlaylistImportRequest):
         ids = list(dict.fromkeys(re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', html)))[:req.limit]
         if not ids:
             raise HTTPException(status_code=422, detail="The playlist is private, unavailable, or could not be read.")
-        return {"videos": [{"video_id": video_id, "title": f"YouTube Video ({video_id})"} for video_id in ids], "limited": len(ids) >= req.limit}
+        videos = []
+        for position, video_id in enumerate(ids, start=1):
+            title, _thumbnail = fetch_video_details(video_id)
+            videos.append({
+                "video_id": video_id,
+                "title": title,
+                "position": position,
+            })
+        return {"videos": videos, "limited": len(ids) >= req.limit}
     except HTTPException:
         raise
     except (OSError, ValueError) as error:

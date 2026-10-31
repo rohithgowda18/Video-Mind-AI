@@ -543,29 +543,88 @@ export default function App() {
     persistFolders(folders.map((item) => item.id === folder.id ? { ...item, videos } : item));
   };
 
-  const importPlaylistToFolder = (folder: LibraryFolder) => {
-    openInputDialog('Import YouTube playlist', 'Only public playlists can be inspected. Videos are indexed one at a time and unavailable items are skipped.', '', 'https://youtube.com/playlist?list=...', 'Inspect playlist', async (url) => {
-      try {
-        const result = await inspectPlaylist(url.trim(), 50);
-        const existingIds = new Set(folder.videos.map((video) => video.id));
-        const candidates = result.videos.filter((video: { video_id: string }) => !existingIds.has(video.video_id));
-        let added = 0;
-        const nextVideos = [...folder.videos];
-        for (const candidate of candidates) {
-          try {
-            const loaded = await loadVideo(candidate.video_id, folder.name);
-            nextVideos.push({ id: loaded.video_id, title: loaded.title || candidate.title, status: 'ready' });
-            added += 1;
-          } catch {
-            // Keep importing other public playlist items; failures are reported below.
-          }
+  const importPlaylistIntoFolder = async (folder: LibraryFolder, url: string) => {
+    if (indexingFolderId === folder.id) return;
+    setIndexingFolderId(folder.id);
+    try {
+      const result = await inspectPlaylist(url, 100);
+      const existingIds = new Set(folder.videos.map((video) => video.id));
+      const candidates = result.videos
+        .filter((video: { video_id: string }) => !existingIds.has(video.video_id))
+        .sort((a: { position?: number }, b: { position?: number }) => (a.position || 0) - (b.position || 0));
+      let added = 0;
+      const failures: string[] = [];
+      let nextVideos = [...folder.videos];
+      nextVideos = [...nextVideos, ...candidates.map((candidate: { video_id: string; title?: string }) => ({
+        id: candidate.video_id,
+        title: candidate.title || `YouTube Video (${candidate.video_id})`,
+        status: 'indexing' as const,
+      }))];
+      persistFolders(folders.map((item) => item.id === folder.id ? { ...item, videos: nextVideos } : item));
+      for (const candidate of candidates) {
+        try {
+          const loaded = await loadVideo(candidate.video_id, folder.name);
+          nextVideos = nextVideos.map((video) => video.id === loaded.video_id
+            ? { ...video, title: loaded.title || candidate.title || video.title, status: 'ready' as const }
+            : video);
+          added += 1;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Indexing failed';
+          failures.push(`${candidate.title || candidate.video_id}: ${message}`);
+          nextVideos = nextVideos.map((video) => video.id === candidate.video_id
+            ? { ...video, status: 'unavailable' as const }
+            : video);
         }
         persistFolders(folders.map((item) => item.id === folder.id ? { ...item, videos: nextVideos } : item));
-        showToast('success', `Playlist import finished: ${added} added, ${result.videos.length - added} skipped or unavailable.`);
-      } catch (error: any) {
-        showToast('error', error.message || 'Playlist import failed.');
       }
+      if (failures.length > 0) {
+        showToast('error', `Playlist import finished with ${failures.length} unavailable video${failures.length === 1 ? '' : 's'}. ${failures[0]}`);
+      } else {
+        showToast('success', `Playlist import finished: ${added} ready, ${result.videos.length - candidates.length} already in folder.`);
+      }
+    } catch (error: any) {
+      showToast('error', error.message || 'Playlist import failed.');
+    } finally {
+      setIndexingFolderId(null);
+    }
+  };
+
+  const importPlaylistToFolder = (folder: LibraryFolder) => {
+    openInputDialog('Import YouTube playlist', 'Paste a public playlist URL. Videos will be added to this folder in playlist order with their YouTube titles.', '', 'https://youtube.com/playlist?list=...', 'Import playlist', async (url) => {
+      await importPlaylistIntoFolder(folder, url.trim());
     });
+  };
+
+  const importPlaylistFromLibrary = () => {
+    const targetFolder = selectedFolder || (folders.length === 1 ? folders[0] : null);
+    openInputDialog(
+      'Import YouTube playlist',
+      targetFolder
+        ? `Paste a public playlist URL. Videos will be added to "${targetFolder.name}" in playlist order.`
+        : 'Paste a public playlist URL. You will choose the destination folder next.',
+      '',
+      'https://youtube.com/playlist?list=...',
+      'Continue',
+      async (rawUrl) => {
+        const url = rawUrl.trim();
+        if (!url) {
+          showToast('error', 'Enter a YouTube playlist URL.');
+          return;
+        }
+        if (targetFolder) {
+          await importPlaylistIntoFolder(targetFolder, url);
+          return;
+        }
+        openInputDialog('Choose destination folder', 'Enter the exact name of an existing folder for this playlist.', '', 'e.g. Java', 'Import playlist', async (folderName) => {
+          const folder = folders.find((item) => item.name.toLowerCase() === folderName.trim().toLowerCase());
+          if (!folder) {
+            showToast('error', `Folder "${folderName.trim()}" was not found. Create it first, then import the playlist.`);
+            return;
+          }
+          await importPlaylistIntoFolder(folder, url);
+        });
+      },
+    );
   };
 
   React.useEffect(() => {
@@ -793,8 +852,8 @@ export default function App() {
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              dialog.onConfirm(dialog.kind === 'input' ? dialogValue : '');
               setDialog(null);
+              void dialog.onConfirm(dialog.kind === 'input' ? dialogValue : '');
             }}
             className="w-full max-w-md rounded-2xl bg-[#111827] border border-slate-700 shadow-2xl p-6"
           >
@@ -998,8 +1057,11 @@ export default function App() {
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-2">
                   <input ref={importInputRef} type="file" accept="application/json,.json" onChange={importLibrary} className="hidden" />
+                  <button onClick={importPlaylistFromLibrary} className="px-3 py-2 rounded-lg bg-indigo-500 text-white border border-indigo-400 text-xs font-semibold flex items-center gap-2 hover:bg-indigo-400">
+                    <Upload className="w-4 h-4" /> Import playlist
+                  </button>
                   <button onClick={() => importInputRef.current?.click()} className="px-3 py-2 rounded-lg bg-slate-800 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 hover:bg-slate-700">
-                    <Upload className="w-4 h-4" /> Import
+                    <Download className="w-4 h-4" /> Restore backup
                   </button>
                   <button onClick={exportLibrary} disabled={folders.length === 0} className="px-3 py-2 rounded-lg bg-slate-800 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 hover:bg-slate-700 disabled:opacity-40">
                     <Download className="w-4 h-4" /> Export
@@ -1056,7 +1118,9 @@ export default function App() {
                           <button aria-label={`Add video to ${folder.name}`} disabled={indexingFolderId === folder.id} onClick={() => addVideoToFolder(folder)} className="p-2 text-sky-300 hover:bg-sky-500/10 rounded disabled:opacity-50">
                             {indexingFolderId === folder.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderPlus className="w-4 h-4" />}
                           </button>
-                          <button aria-label={`Import playlist to ${folder.name}`} onClick={() => importPlaylistToFolder(folder)} className="p-2 text-purple-300 hover:bg-purple-500/10 rounded"><Upload className="w-4 h-4" /></button>
+                          <button aria-label={`Import playlist to ${folder.name}`} disabled={indexingFolderId === folder.id} onClick={() => importPlaylistToFolder(folder)} className="p-2 text-purple-300 hover:bg-purple-500/10 rounded disabled:opacity-50">
+                            {indexingFolderId === folder.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                          </button>
                           <button aria-label={`Rename ${folder.name}`} onClick={() => renameFolder(folder)} className="p-2 text-slate-300 hover:bg-slate-700 rounded"><Pencil className="w-4 h-4" /></button>
                           <button aria-label={`Delete ${folder.name}`} onClick={() => deleteFolder(folder)} className="p-2 text-red-300 hover:bg-red-500/10 rounded"><Trash2 className="w-4 h-4" /></button>
                         </div>

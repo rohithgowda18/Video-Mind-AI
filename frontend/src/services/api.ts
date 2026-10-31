@@ -13,9 +13,11 @@ const API_BASE_URL = getApiBaseUrl();
  * Helper to handle HTTP errors cleanly
  */
 async function handleResponse(response: Response) {
-  const data = await response.json();
+  const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const errorMsg = data.detail || 'An unexpected error occurred. Please try again.';
+    const errorMsg = typeof data.detail === 'string'
+      ? data.detail
+      : 'An unexpected error occurred. Please try again.';
     throw new Error(errorMsg);
   }
   return data;

@@ -92,7 +92,21 @@ def fetch_transcript(video_id: str) -> List[Dict[str, Any]]:
 
     try:
         ytt_api = YouTubeTranscriptApi()
-        transcript_snippets = ytt_api.fetch(video_id, languages=["en"])
+        try:
+            transcript_snippets = ytt_api.fetch(video_id, languages=["en"])
+        except NoTranscriptFound:
+            # Playlists often contain non-English lessons or auto-generated
+            # captions. Prefer English when available, then use the first
+            # available transcript so the video can still be indexed.
+            transcript_list = ytt_api.list(video_id)
+            available = list(transcript_list)
+            if not available:
+                raise RuntimeError("No transcript is available for this video.")
+            preferred = next(
+                (item for item in available if item.language_code.startswith("en")),
+                available[0],
+            )
+            transcript_snippets = preferred.fetch()
         
         snippets_data = []
         for snippet in transcript_snippets:
@@ -112,7 +126,7 @@ def fetch_transcript(video_id: str) -> List[Dict[str, Any]]:
     except TranscriptsDisabled:
         raise RuntimeError("No transcript is available for this video.")
     except NoTranscriptFound:
-        raise RuntimeError("No English transcript is available for this video.")
+        raise RuntimeError("No transcript is available for this video.")
     except InvalidVideoId:
         raise ValueError("Invalid YouTube URL or Video ID.")
     except VideoUnavailable:

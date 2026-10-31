@@ -98,6 +98,7 @@ export default function App() {
       return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item.id === 'string' && typeof item.videoId === 'string' && Number.isFinite(item.timestamp)) : [];
     } catch { return []; }
   });
+  const bookmarksRef = useRef<BookmarkItem[]>(bookmarks);
   const [progress, setProgress] = useState<Record<string, ProgressItem>>(() => {
     try {
       const parsed = JSON.parse(localStorage.getItem('video-mind-progress') || '{}');
@@ -182,9 +183,18 @@ export default function App() {
   };
 
   const persistBookmarks = (next: BookmarkItem[]) => {
+    bookmarksRef.current = next;
     setBookmarks(next);
     try { localStorage.setItem('video-mind-bookmarks', JSON.stringify(next)); }
     catch { showToast('error', 'Bookmarks could not be saved in this browser.'); }
+  };
+
+  const seekToTimestamp = (timestamp: number) => {
+    const target = Math.max(0, Math.floor(timestamp));
+    setPlayerSeekTime(target);
+    sendPlayerCommand('seekTo', [target, true]);
+    window.setTimeout(() => sendPlayerCommand('seekTo', [target, true]), 350);
+    window.setTimeout(() => sendPlayerCommand('seekTo', [target, true]), 1000);
   };
 
   const persistProgress = (next: Record<string, ProgressItem>) => {
@@ -290,9 +300,10 @@ export default function App() {
     if (currentPage !== 'dashboard') return;
     void getIndexedVideos()
       .then((response) => {
-        const indexed = Array.isArray(response?.indexes)
-          ? response.indexes as Array<{ video_id?: unknown; title?: unknown; folder_name?: unknown }>
-          : (Array.isArray(response?.videos) ? response.videos.map((videoId: unknown) => ({ video_id: videoId })) : []);
+        type IndexedVideoMetadata = { video_id?: unknown; title?: unknown; folder_name?: unknown };
+        const indexed: IndexedVideoMetadata[] = Array.isArray(response?.indexes)
+          ? response.indexes as IndexedVideoMetadata[]
+          : (Array.isArray(response?.videos) ? response.videos.map((videoId: unknown): IndexedVideoMetadata => ({ video_id: videoId })) : []);
         setFolders((current) => {
           const metadataById = new Map(
             indexed
@@ -505,21 +516,24 @@ export default function App() {
 
   const addBookmark = () => {
     if (!loadedVideoId) return;
+    const bookmarkVideoId = loadedVideoId;
+    const bookmarkVideoTitle = videoTitle || `YouTube Video (${loadedVideoId})`;
+    const bookmarkTimestamp = Math.max(0, Math.floor(playerSeekTime));
     openInputDialog('Save bookmark', 'Add a short title for this moment. You can add a note in the next step.', '', 'e.g. Important definition', 'Next', (title) => {
       const now = new Date().toISOString();
       openInputDialog('Add a note (optional)', 'Capture why this timestamp matters to you.', '', 'Your note', 'Save bookmark', (note) => {
         const bookmark: BookmarkItem = {
-          id: `${Date.now()}-${loadedVideoId}`,
-          videoId: loadedVideoId,
-          videoTitle: videoTitle || `YouTube Video (${loadedVideoId})`,
-          timestamp: Math.max(0, Math.floor(playerSeekTime)),
-          title: title.trim() || `Bookmark at ${Math.floor(playerSeekTime)}s`,
+          id: `${Date.now()}-${bookmarkVideoId}`,
+          videoId: bookmarkVideoId,
+          videoTitle: bookmarkVideoTitle,
+          timestamp: bookmarkTimestamp,
+          title: title.trim() || `Bookmark at ${bookmarkTimestamp}s`,
           note: note.trim(),
           createdAt: now,
           updatedAt: now,
         };
 
-        persistBookmarks([bookmark, ...bookmarks]);
+        persistBookmarks([bookmark, ...bookmarksRef.current]);
         showToast('success', 'Bookmark saved.');
       });
     });
@@ -527,7 +541,7 @@ export default function App() {
 
   const editBookmark = (bookmark: BookmarkItem) => {
     openInputDialog('Edit bookmark', 'Update the bookmark title. Its note and timestamp will be preserved.', bookmark.title, 'Bookmark title', 'Save changes', (title) => {
-      persistBookmarks(bookmarks.map((item) => item.id === bookmark.id
+      persistBookmarks(bookmarksRef.current.map((item) => item.id === bookmark.id
         ? { ...item, title: title.trim() || item.title, updatedAt: new Date().toISOString() }
         : item));
       showToast('success', 'Bookmark updated.');
@@ -644,7 +658,7 @@ export default function App() {
         });
       });
       bookmarks.forEach((bookmark) => {
-        if (`${bookmark.title} ${bookmark.note} ${bookmark.videoTitle}`.toLowerCase().includes(query)) {
+        if (query === 'bookmark' || `${bookmark.title} ${bookmark.note} ${bookmark.videoTitle}`.toLowerCase().includes(query)) {
           results.push({ type: 'Bookmark', title: bookmark.title, text: bookmark.note, videoId: bookmark.videoId, timestamp: bookmark.timestamp });
         }
       });
@@ -1336,8 +1350,7 @@ export default function App() {
                         <label htmlFor="manual-timestamp" className="text-slate-500">Jump to second</label>
                         <input id="manual-timestamp" type="number" min="0" value={playerSeekTime} onChange={(event) => {
                           const timestamp = Math.max(0, Number(event.target.value) || 0);
-                          setPlayerSeekTime(timestamp);
-                          sendPlayerCommand('seekTo', [timestamp, true]);
+                          seekToTimestamp(timestamp);
                         }} className="w-20 rounded bg-slate-950 border border-slate-700 px-2 py-1 text-white" />
                         <button onClick={addBookmark} className="px-2.5 py-1.5 rounded-lg bg-amber-500/20 text-amber-200 border border-amber-400/30 font-semibold flex items-center gap-1"><Bookmark className="w-3.5 h-3.5" /> Save bookmark</button>
                         {loadedVideoId && <button onClick={() => persistProgress({ ...progress, [loadedVideoId]: { ...(progress[loadedVideoId] || { videoId: loadedVideoId, position: playerSeekTime }), videoId: loadedVideoId, position: playerSeekTime, lastAccessed: new Date().toISOString(), completed: !progress[loadedVideoId]?.completed } })} className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-200 border border-emerald-400/30 font-semibold">
@@ -1349,12 +1362,11 @@ export default function App() {
                         {bookmarks.filter((bookmark) => bookmark.videoId === loadedVideoId).length === 0 ? <p className="text-slate-500">No bookmarks for this video yet.</p> : bookmarks.filter((bookmark) => bookmark.videoId === loadedVideoId).slice(0, 5).map((bookmark) => (
                           <div key={bookmark.id} className="flex items-center justify-between gap-2 py-1">
                             <button onClick={() => {
-                              setPlayerSeekTime(bookmark.timestamp);
-                              sendPlayerCommand('seekTo', [bookmark.timestamp, true]);
+                              seekToTimestamp(bookmark.timestamp);
                             }} className="truncate text-left text-sky-300 hover:text-sky-200">{bookmark.title} · {Math.floor(bookmark.timestamp)}s</button>
                             <span className="flex items-center gap-1">
                               <button aria-label={`Edit bookmark ${bookmark.title}`} onClick={() => editBookmark(bookmark)} className="text-slate-300 hover:text-white"><Pencil className="w-3.5 h-3.5" /></button>
-                              <button aria-label={`Delete bookmark ${bookmark.title}`} onClick={() => persistBookmarks(bookmarks.filter((item) => item.id !== bookmark.id))} className="text-red-300 hover:text-red-200"><Trash2 className="w-3.5 h-3.5" /></button>
+                              <button aria-label={`Delete bookmark ${bookmark.title}`} onClick={() => persistBookmarks(bookmarksRef.current.filter((item) => item.id !== bookmark.id))} className="text-red-300 hover:text-red-200"><Trash2 className="w-3.5 h-3.5" /></button>
                             </span>
                           </div>
                         ))}
@@ -1410,9 +1422,7 @@ export default function App() {
                                         <div className="flex items-center justify-between">
                                           <button
                                             onClick={() => {
-                                              setLoadedVideoId(src.video_id);
-                                              setVideoTitle(src.title);
-                                              setPlayerSeekTime(src.timestamp);
+                                              openVideoContext(src.video_id, src.title, src.timestamp);
                                             }}
                                             className="text-sky-300 hover:text-sky-100 font-mono font-bold text-[11px] flex items-center gap-1 cursor-pointer bg-sky-500/20 hover:bg-sky-500/40 px-2 py-0.5 rounded transition-all"
                                             title="Click to jump video to this second"

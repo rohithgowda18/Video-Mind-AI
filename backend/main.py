@@ -209,7 +209,20 @@ def inspect_playlist(req: PlaylistImportRequest):
         request = urllib.request.Request(req.url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(request, timeout=10) as response:
             html = response.read().decode("utf-8", errors="ignore")
-        ids = list(dict.fromkeys(re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', html)))[:req.limit]
+        id_patterns = (
+            r'"videoId":"([A-Za-z0-9_-]{11})"',
+            r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"',
+            r'videoId\\":\\"([A-Za-z0-9_-]{11})',
+        )
+        ids = []
+        for pattern in id_patterns:
+            for video_id in re.findall(pattern, html):
+                if video_id not in ids:
+                    ids.append(video_id)
+                if len(ids) >= req.limit:
+                    break
+            if len(ids) >= req.limit:
+                break
         if not ids:
             raise HTTPException(status_code=422, detail="The playlist is private, unavailable, or could not be read.")
         videos = []

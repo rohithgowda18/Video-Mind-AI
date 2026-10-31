@@ -23,16 +23,26 @@ async function handleResponse(response: Response) {
   return data;
 }
 
+async function request(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch {
+    throw new Error(
+      'The local backend is unavailable. Start FastAPI on http://localhost:8000 and try again.',
+    );
+  }
+}
+
 /**
  * Fetch list of video IDs that have stored indexes on disk
  */
 export async function getIndexedVideos() {
-  const response = await fetch(`${API_BASE_URL}/videos/indexed`);
+  const response = await request(`${API_BASE_URL}/videos/indexed`);
   return handleResponse(response);
 }
 
 export async function inspectPlaylist(url: string, limit = 50) {
-  const response = await fetch(`${API_BASE_URL}/playlist/inspect`, {
+  const response = await request(`${API_BASE_URL}/playlist/inspect`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url, limit }),
@@ -41,12 +51,12 @@ export async function inspectPlaylist(url: string, limit = 50) {
 }
 
 export async function getVideoStatus(videoId: string) {
-  const response = await fetch(`${API_BASE_URL}/video/status/${encodeURIComponent(videoId)}`);
+  const response = await request(`${API_BASE_URL}/video/status/${encodeURIComponent(videoId)}`);
   return handleResponse(response);
 }
 
 export async function searchTranscript(query: string, videoIds: string[]) {
-  const response = await fetch(`${API_BASE_URL}/search/transcript`, {
+  const response = await request(`${API_BASE_URL}/search/transcript`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, video_ids: videoIds }),
@@ -59,7 +69,7 @@ export async function searchTranscript(query: string, videoIds: string[]) {
  * @param url Video URL or 11-char Video ID
  */
 export async function loadVideo(url: string, folderName?: string) {
-  const response = await fetch(`${API_BASE_URL}/video/load`, {
+  const response = await request(`${API_BASE_URL}/video/load`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -81,7 +91,7 @@ export async function askQuestion(
   history?: Array<{ role: 'user' | 'assistant'; content: string }>,
   videoTitles?: Record<string, string>
 ) {
-  const response = await fetch(`${API_BASE_URL}/ask`, {
+  const response = await request(`${API_BASE_URL}/ask`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -102,7 +112,7 @@ export async function askQuestion(
  * @param videoId 11-char Video ID
  */
 export async function summarizeVideo(videoId: string | string[], videoTitles?: Record<string, string>) {
-  const response = await fetch(`${API_BASE_URL}/summarize`, {
+  const response = await request(`${API_BASE_URL}/summarize`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -121,7 +131,7 @@ export async function summarizeVideo(videoId: string | string[], videoTitles?: R
  * @param videoId 11-char Video ID
  */
 export async function getKeyTakeaways(videoId: string | string[], videoTitles?: Record<string, string>) {
-  const response = await fetch(`${API_BASE_URL}/key-takeaways`, {
+  const response = await request(`${API_BASE_URL}/key-takeaways`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -140,7 +150,7 @@ export async function getKeyTakeaways(videoId: string | string[], videoTitles?: 
  * @param videoId 11-char Video ID
  */
 export async function getMindmap(videoId: string | string[], videoTitles?: Record<string, string>) {
-  const response = await fetch(`${API_BASE_URL}/mindmap`, {
+  const response = await request(`${API_BASE_URL}/mindmap`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -159,7 +169,7 @@ export async function getMindmap(videoId: string | string[], videoTitles?: Recor
  * @param videoId 11-char Video ID
  */
 export async function getQuiz(videoId: string | string[], videoTitles?: Record<string, string>) {
-  const response = await fetch(`${API_BASE_URL}/quiz`, {
+  const response = await request(`${API_BASE_URL}/quiz`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

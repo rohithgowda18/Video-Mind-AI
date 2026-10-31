@@ -29,6 +29,7 @@ import {
   getKeyTakeaways,
   getMindmap,
   getQuiz,
+  getIndexedVideos,
   inspectPlaylist,
   searchTranscript
 } from './services/api';
@@ -284,17 +285,63 @@ export default function App() {
     setDialog({ kind: 'confirm', title, message, confirmLabel, onConfirm: () => onConfirm() });
   };
 
-  // Auto-fetch stored video IDs when visiting dashboard
+  // Recover indexes that predate this browser's localStorage library.
   React.useEffect(() => {
-    if (currentPage === 'dashboard') {
-      // Upgrade legacy ID-only paths when their library folder is known.
-      void Promise.all(
-        folders.flatMap((folder) =>
-          folder.videos.map((video) => loadVideo(video.id, folder.name).catch(() => null))
-        )
-      );
-    }
-  }, [currentPage, folders]);
+    if (currentPage !== 'dashboard') return;
+    void getIndexedVideos()
+      .then((response) => {
+        const indexed = Array.isArray(response?.indexes)
+          ? response.indexes as Array<{ video_id?: unknown; title?: unknown; folder_name?: unknown }>
+          : (Array.isArray(response?.videos) ? response.videos.map((videoId: unknown) => ({ video_id: videoId })) : []);
+        setFolders((current) => {
+          const metadataById = new Map(
+            indexed
+              .filter((item) => typeof item.video_id === 'string')
+              .map((item) => [item.video_id as string, item]),
+          );
+          const normalized = current.map((folder) => ({
+            ...folder,
+            name: folder.name.toLowerCase() === 'faiss_indexes' ? 'Recovered indexes' : folder.name,
+            videos: folder.videos.map((video) => {
+              const metadata = metadataById.get(video.id);
+              const title = typeof metadata?.title === 'string' && metadata.title.trim()
+                ? metadata.title
+                : video.title;
+              return { ...video, title };
+            }),
+          }));
+          const knownIds = new Set(normalized.flatMap((folder) => folder.videos.map((video) => video.id)));
+          const recovered = indexed
+            .filter((item) => typeof item.video_id === 'string' && !knownIds.has(item.video_id))
+            .map((item) => ({
+              id: item.video_id as string,
+              title: typeof item.title === 'string' && item.title.trim() ? item.title : `YouTube Video (${item.video_id})`,
+              folderName: typeof item.folder_name === 'string' && item.folder_name && item.folder_name !== 'faiss_indexes'
+                ? item.folder_name
+                : 'Recovered indexes',
+            }));
+          if (recovered.length === 0) return normalized;
+          const next = [...normalized];
+          recovered.forEach((item) => {
+            const folderName = item.folderName;
+            const folder = next.find((entry) => entry.name.toLowerCase() === folderName.toLowerCase());
+            const video = { id: item.id, title: item.title, status: 'ready' as const };
+            if (folder) folder.videos.push(video);
+            else next.push({
+              id: `recovered-${folderName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+              name: folderName,
+              videos: [video],
+              completedVideoIds: [],
+            });
+          });
+          try { localStorage.setItem('video-mind-folders', JSON.stringify(next)); } catch { /* Storage is optional. */ }
+          return next;
+        });
+      })
+      .catch(() => {
+        showToast('info', 'Saved local indexes could not be listed. You can still load a video by URL.');
+      });
+  }, [currentPage]);
 
 
   // Q&A State

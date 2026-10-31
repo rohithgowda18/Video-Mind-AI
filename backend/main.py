@@ -57,6 +57,9 @@ if frontend_url:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=default_origins,
+    # Vite may move to another local port when the default port is occupied.
+    # Keep arbitrary production origins out of CORS; FRONTEND_URL handles those explicitly.
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -140,16 +143,51 @@ def read_root():
 
 @app.get("/api/videos/indexed")
 def get_indexed_videos():
-    """Return list of video IDs that have existing FAISS indexes on disk."""
+    """Return indexed IDs plus readable hierarchy metadata for library recovery."""
     from rag_pipeline import FAISS_INDEXES_DIR
     indexes = []
+    details = []
     if os.path.exists(FAISS_INDEXES_DIR) and os.path.isdir(FAISS_INDEXES_DIR):
         for root, _dirs, _files in os.walk(FAISS_INDEXES_DIR):
             if os.path.basename(root) == "faiss_indexes":
                 continue
             if os.path.exists(os.path.join(root, "index.faiss")) and os.path.exists(os.path.join(root, "index.pkl")):
-                indexes.append(os.path.basename(root).split("__")[-1])
-    return {"videos": indexes}
+                directory_name = os.path.basename(root)
+                video_id = directory_name.split("__")[-1]
+                if not validate_video_id(video_id) or video_id in indexes:
+                    continue
+                indexes.append(video_id)
+                title = directory_name.rsplit("__", 1)[0] if "__" in directory_name else None
+                folder_name = os.path.basename(os.path.dirname(root))
+                if folder_name == os.path.basename(FAISS_INDEXES_DIR):
+                    folder_name = "Recovered indexes"
+                try:
+                    store = load_faiss_index(video_id)
+                    documents = list(store.docstore._dict.values()) if store else []
+                    metadata = documents[0].metadata if documents else {}
+                    if not title or title.startswith("Video-"):
+                        stored_title = metadata.get("title")
+                        if isinstance(stored_title, str) and stored_title.strip():
+                            title = stored_title.strip()
+                    stored_folder = metadata.get("folder_name")
+                    if folder_name == "Recovered indexes" and isinstance(stored_folder, str) and stored_folder.strip():
+                        folder_name = stored_folder.strip()
+                except Exception:
+                    # The index is still usable even if metadata recovery fails.
+                    pass
+                if not title or title.startswith("Video-") or title.startswith("YouTube Video ("):
+                    try:
+                        fetched_title, _thumbnail = fetch_video_details(video_id)
+                        if fetched_title and not fetched_title.startswith("YouTube Video ("):
+                            title = fetched_title
+                    except Exception:
+                        pass
+                details.append({
+                    "video_id": video_id,
+                    "title": title or f"YouTube Video ({video_id})",
+                    "folder_name": folder_name,
+                })
+    return {"videos": indexes, "indexes": details}
 
 
 @app.get("/api/video/status/{video_id}")

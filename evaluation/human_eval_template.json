@@ -1,0 +1,46 @@
+{
+  "rubric_description": "Human evaluation scoring rubric (1 to 5 scale) matching the IEEE Base Paper qualitative evaluation criteria.",
+  "rating_scale": {
+    "1": "Very Poor: Irrelevant, highly hallucinated, unreadable, or missing key information.",
+    "2": "Poor: Partially relevant but contains noticeable factual inaccuracies or omits critical concepts.",
+    "3": "Moderate: Mostly accurate and understandable, but lacks depth, conciseness, or structure.",
+    "4": "Good: Accurate, well-grounded in transcript, clear structure with minor omissions.",
+    "5": "Excellent: Completely accurate, zero hallucinations, concise, and structured."
+  },
+  "categories_evaluated": {
+    "Academic": {
+      "video_id": "a2L8ra2TOMg",
+      "ratings": {
+        "paragraph_summary_quality": null,
+        "key_points_quality": null,
+        "definitions_quality": null,
+        "chapters_mindmap_quality": null,
+        "qa_accuracy": null
+      },
+      "reviewer_notes": ""
+    },
+    "Technical": {
+      "video_id": "iX8g4LqF8p8",
+      "ratings": {
+        "paragraph_summary_quality": null,
+        "key_points_quality": null,
+        "definitions_quality": null,
+        "chapters_mindmap_quality": null,
+        "qa_accuracy": null
+      },
+      "reviewer_notes": ""
+    },
+    "Conversational": {
+      "video_id": "Gfr50f6ZBvo",
+      "ratings": {
+        "paragraph_summary_quality": null,
+        "key_points_quality": null,
+        "definitions_quality": null,
+        "chapters_mindmap_quality": null,
+        "qa_accuracy": null
+      },
+      "reviewer_notes": ""
+    }
+  }
+}
+

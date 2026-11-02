@@ -290,10 +290,17 @@ def load_video(req: LoadVideoRequest):
 
         # 1. Reuse an existing index, migrating legacy ID-only storage when possible.
         if check_faiss_index_exists(video_id):
+            t_reuse_start = time.perf_counter()
             index_path = migrate_faiss_index(video_id, req.folder_name, title)
+            t_reuse_ms = round((time.perf_counter() - t_reuse_start) * 1000, 1)
+            print(f"[TIMING] Video [{video_id}] already indexed on disk. Reused index in {t_reuse_ms} ms")
         else:
             # Fetch transcript and build new FAISS index only if not present
+            t_trans_start = time.perf_counter()
             snippets = fetch_transcript(video_id)
+            t_trans_ms = round((time.perf_counter() - t_trans_start) * 1000, 1)
+            print(f"\n[TIMING] Fetched transcript for [{video_id}]: {len(snippets)} snippets in {t_trans_ms} ms")
+
             build_or_load_faiss_index(snippets, video_id, req.folder_name, title)
             index_path = find_faiss_index_path(video_id)
 
@@ -359,8 +366,8 @@ def summarize_endpoint(req: ActionRequest):
     """Generate structured summary of the loaded video."""
     try:
         vector_store, _ = _load_action_context(req)
-        summary = summarize_video(vector_store)
-        return {"summary": summary}
+        summary, metrics = summarize_video(vector_store)
+        return {"summary": summary, "metrics": metrics}
     except HTTPException:
         raise
     except Exception as e:

@@ -193,25 +193,37 @@ def build_or_load_faiss_index(
     snippets: List[Dict[str, Any]], video_id: str, folder_name: Optional[str] = None,
     video_title: Optional[str] = None,
 ) -> FAISS:
-    """Load existing FAISS index from disk or build and save a new index."""
+    """Load existing FAISS index from disk or build and save a new index with live terminal logging."""
     # 1. Try loading existing local FAISS index
+    t_load_start = time.perf_counter()
     existing_store = load_faiss_index(video_id)
     if existing_store is not None:
+        t_load_ms = round((time.perf_counter() - t_load_start) * 1000, 1)
+        print(f"[TIMING] Loaded cached FAISS index for [{video_id}] in {t_load_ms} ms")
         return existing_store
 
     # 2. Build new index if not already present
     if not snippets:
         raise ValueError("Cannot build FAISS index without transcript snippets.")
 
+    t_chunk_start = time.perf_counter()
     chunks = create_documents_from_snippets(snippets, video_id, video_title, folder_name)
+    t_chunk_ms = round((time.perf_counter() - t_chunk_start) * 1000, 1)
     if not chunks:
         raise ValueError("Failed to generate document chunks from transcript.")
+    print(f"[TIMING] Chunking completed: {len(chunks)} chunks created in {t_chunk_ms} ms")
 
+    t_embed_start = time.perf_counter()
     embedding = load_embedding_model()
     vector_store = FAISS.from_documents(chunks, embedding)
+    t_embed_ms = round((time.perf_counter() - t_embed_start) * 1000, 1)
+    print(f"[TIMING] MiniLM Embeddings & FAISS indexing completed in {t_embed_ms} ms")
 
     # 3. Save newly created index for future instant reuse
+    t_save_start = time.perf_counter()
     save_faiss_index(vector_store, video_id, folder_name, video_title)
+    t_save_ms = round((time.perf_counter() - t_save_start) * 1000, 1)
+    print(f"[TIMING] Index saved to disk in {t_save_ms} ms")
 
     return vector_store
 
@@ -348,12 +360,14 @@ Answer:"""
     )
 
     chain = prompt | llm | StrOutputParser()
+    t_gen_start = time.perf_counter()
     answer = chain.invoke({
         "context": context_str,
         "history": history_str if history_str else "None",
         "question": question
     })
-    t_finished = time.perf_counter()
+    t_gen_finished = time.perf_counter()
+    t_finished = t_gen_finished
 
     # 3. Format top 3 structured sources for API response
     sources = []
@@ -373,21 +387,30 @@ Answer:"""
 
     metrics = {
         "retrieval_ms": round((t_retrieved - t_start) * 1000, 1),
-        "generation_ms": round((t_finished - t_retrieved) * 1000, 1),
+        "generation_ms": round((t_gen_finished - t_gen_start) * 1000, 1),
         "total_ms": round((t_finished - t_start) * 1000, 1),
         "chunks_retrieved": len(retrieved_docs),
         "missing_video_ids": missing_video_ids,
     }
 
+    print("\n" + "="*50)
+    print(f"[TIMING] Q&A Execution for Question: \"{question[:50]}...\"")
+    print(f"  • Vector Retrieval (FAISS): {metrics['retrieval_ms']} ms ({metrics['chunks_retrieved']} chunks)")
+    print(f"  • Gemini 2.5 Generation:   {metrics['generation_ms']} ms")
+    print(f"  • Total Response Time:     {metrics['total_ms']} ms")
+    print("="*50 + "\n")
+
     return answer, sources, metrics
 
 
-def summarize_video(vector_store: VectorStoreContext) -> str:
-    """Generate a concise, transcript-grounded structured video summary."""
+def summarize_video(vector_store: VectorStoreContext) -> Tuple[str, Dict[str, float]]:
+    """Generate a concise, transcript-grounded structured video summary with generation timing."""
+    t_ret_start = time.perf_counter()
     retrieved_docs, _ = retrieve_context(
         vector_store, "Overview of main concepts, key points, and overall conclusion of this video",
         k_per_video=5, limit=10,
     )
+    t_ret_end = time.perf_counter()
 
     context = format_docs_with_sources(retrieved_docs)
     llm = get_llm()
@@ -419,15 +442,34 @@ Summary:"""
     )
 
     chain = prompt | llm | StrOutputParser()
-    return chain.invoke({"context": context})
+    t_gen_start = time.perf_counter()
+    summary = chain.invoke({"context": context})
+    t_gen_end = time.perf_counter()
+
+    metrics = {
+        "retrieval_ms": round((t_ret_end - t_ret_start) * 1000, 1),
+        "generation_ms": round((t_gen_end - t_gen_start) * 1000, 1),
+        "total_ms": round((t_gen_end - t_ret_start) * 1000, 1),
+    }
+
+    print("\n" + "="*50)
+    print(f"[TIMING] Summary Execution:")
+    print(f"  • Top-10 Retrieval (FAISS): {metrics['retrieval_ms']} ms")
+    print(f"  • Gemini 2.5 Generation:   {metrics['generation_ms']} ms")
+    print(f"  • Total Summary Time:      {metrics['total_ms']} ms")
+    print("="*50 + "\n")
+
+    return summary, metrics
 
 
 def generate_key_takeaways(vector_store: VectorStoreContext) -> List[str]:
-    """Generate 5–7 short, one-sentence transcript-grounded key takeaways."""
+    """Generate 5–7 short, one-sentence transcript-grounded key takeaways with live terminal logging."""
+    t_ret_start = time.perf_counter()
     retrieved_docs, _ = retrieve_context(
         vector_store, "Important key insights, takeaways, and lessons from the video",
         k_per_video=5, limit=10,
     )
+    t_ret_ms = round((time.perf_counter() - t_ret_start) * 1000, 1)
 
     context = format_docs_with_sources(retrieved_docs)
     llm = get_llm()
@@ -449,7 +491,16 @@ Key Takeaways:"""
     )
 
     chain = prompt | llm | StrOutputParser()
+    t_gen_start = time.perf_counter()
     raw_takeaways = chain.invoke({"context": context})
+    t_gen_ms = round((time.perf_counter() - t_gen_start) * 1000, 1)
+
+    print("\n" + "="*50)
+    print(f"[TIMING] Key Takeaways Execution:")
+    print(f"  • Top-10 Retrieval:        {t_ret_ms} ms")
+    print(f"  • Gemini 2.5 Generation:   {t_gen_ms} ms")
+    print(f"  • Total Time:              {round(t_ret_ms + t_gen_ms, 1)} ms")
+    print("="*50 + "\n")
 
     # Parse bullet points into a clean string array
     takeaways = []
@@ -466,11 +517,14 @@ Key Takeaways:"""
 
 
 def generate_mindmap(vector_store: VectorStoreContext) -> str:
-    """Generate a clean Mermaid.js diagram definition depicting concepts and subtopics."""
+    """Generate a clean Mermaid.js diagram definition depicting concepts and subtopics with live terminal logging."""
+    t_ret_start = time.perf_counter()
     retrieved_docs, _ = retrieve_context(
         vector_store, "Core topics, architecture, components, hierarchy, and workflow",
         k_per_video=5, limit=10,
     )
+    t_ret_ms = round((time.perf_counter() - t_ret_start) * 1000, 1)
+
     context = format_docs_with_sources(retrieved_docs)
     llm = get_llm()
 
@@ -497,7 +551,18 @@ Context:
 
     prompt = PromptTemplate(template=MINDMAP_PROMPT, input_variables=["context"])
     chain = prompt | llm | StrOutputParser()
+    t_gen_start = time.perf_counter()
     result = chain.invoke({"context": context}).strip()
+    t_gen_ms = round((time.perf_counter() - t_gen_start) * 1000, 1)
+
+    print("\n" + "="*50)
+    print(f"[TIMING] Mindmap Execution:")
+    print(f"  • Top-10 Retrieval:        {t_ret_ms} ms")
+    print(f"  • Gemini 2.5 Generation:   {t_gen_ms} ms")
+    print(f"  • Total Time:              {round(t_ret_ms + t_gen_ms, 1)} ms")
+    print("="*50 + "\n")
+
+    # Extract code between ```mermaid and ``` if present
 
     # Extract code between ```mermaid and ``` if present
     match = re.search(r"```(?:mermaid)?\s*([\s\S]*?)\s*```", result)
@@ -507,12 +572,15 @@ Context:
 
 
 def generate_quiz(vector_store: VectorStoreContext) -> List[Dict[str, Any]]:
-    """Generate 3-4 interactive multiple choice questions based on the video transcript."""
+    """Generate 3-4 interactive multiple choice questions based on the video transcript with live terminal logging."""
     import json
+    t_ret_start = time.perf_counter()
     retrieved_docs, _ = retrieve_context(
         vector_store, "Key concepts, definitions, explanations, and core facts",
         k_per_video=5, limit=10,
     )
+    t_ret_ms = round((time.perf_counter() - t_ret_start) * 1000, 1)
+
     context = format_docs_with_sources(retrieved_docs)
     llm = get_llm()
 
@@ -537,7 +605,16 @@ Context:
 
     prompt = PromptTemplate(template=QUIZ_PROMPT, input_variables=["context"])
     chain = prompt | llm | StrOutputParser()
+    t_gen_start = time.perf_counter()
     raw = chain.invoke({"context": context}).strip()
+    t_gen_ms = round((time.perf_counter() - t_gen_start) * 1000, 1)
+
+    print("\n" + "="*50)
+    print(f"[TIMING] Quiz Execution:")
+    print(f"  • Top-10 Retrieval:        {t_ret_ms} ms")
+    print(f"  • Gemini 2.5 Generation:   {t_gen_ms} ms")
+    print(f"  • Total Time:              {round(t_ret_ms + t_gen_ms, 1)} ms")
+    print("="*50 + "\n")
 
     # Strip markdown code fencing if model wrapped it
     raw_cleaned = re.sub(r"^```(?:json)?\s*", "", raw)

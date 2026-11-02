@@ -1401,13 +1401,29 @@ export default function App() {
 
                                 {/* AI Performance Metrics Badge */}
                                 {msg.metrics && (
-                                  <div className="mt-1.5 flex items-center gap-2 text-[10px] font-mono text-emerald-400 bg-emerald-950/40 px-2.5 py-1 rounded-md border border-emerald-500/20">
+                                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[10px] font-mono text-emerald-400 bg-emerald-950/40 px-2.5 py-1 rounded-md border border-emerald-500/20">
                                     <Gauge className="w-3 h-3" />
-                                    <span>Retrieval: {msg.metrics.retrieval_ms}ms</span>
-                                    <span>•</span>
-                                    <span>Inference: {msg.metrics.generation_ms}ms</span>
-                                    <span>•</span>
-                                    <span>Top {msg.metrics.chunks_retrieved} Chunks</span>
+                                    {msg.metrics.retrieval_ms !== undefined && (
+                                      <span>Retrieval: {msg.metrics.retrieval_ms}ms</span>
+                                    )}
+                                    {msg.metrics.generation_ms !== undefined && (
+                                      <>
+                                        <span>•</span>
+                                        <span>Inference: {msg.metrics.generation_ms}ms</span>
+                                      </>
+                                    )}
+                                    {msg.metrics.total_ms !== undefined && (
+                                      <>
+                                        <span>•</span>
+                                        <span>Total: {msg.metrics.total_ms}ms</span>
+                                      </>
+                                    )}
+                                    {msg.metrics.chunks_retrieved !== undefined && (
+                                      <>
+                                        <span>•</span>
+                                        <span>Top {msg.metrics.chunks_retrieved} Chunks</span>
+                                      </>
+                                    )}
                                   </div>
                                 )}
 

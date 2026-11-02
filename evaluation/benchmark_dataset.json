@@ -1,0 +1,109 @@
+{
+  "categories": {
+    "Academic": {
+      "video_id": "a2L8ra2TOMg",
+      "title": "HTML Tutorial - What is HTML (Edureka)",
+      "total_chunks": 20,
+      "questions": [
+        {
+          "id": "acad_1",
+          "type": "exact_keyword",
+          "question": "What does HTML stand for and what is it used for?",
+          "relevant_chunk_ids": [0, 1],
+          "reference_answer": "HTML stands for HyperText Markup Language and is used to create and design web pages."
+        },
+        {
+          "id": "acad_2",
+          "type": "exact_keyword",
+          "question": "What is the difference between an HTML tag and an HTML element?",
+          "relevant_chunk_ids": [4, 5],
+          "reference_answer": "An HTML tag is the syntax like <p> or </p>, whereas an element includes the opening tag, content, and closing tag."
+        },
+        {
+          "id": "acad_3",
+          "type": "paraphrased",
+          "question": "How do web browsers interpret document structure to display text on a screen?",
+          "relevant_chunk_ids": [1, 2],
+          "reference_answer": "Browsers parse markup tags to render headings, paragraphs, and images following DOM hierarchy."
+        },
+        {
+          "id": "acad_4",
+          "type": "paraphrased",
+          "question": "What instructions tell the browser which version of the markup standard is being used?",
+          "relevant_chunk_ids": [2, 3],
+          "reference_answer": "The DOCTYPE declaration specifies the HTML standard version for the document."
+        }
+      ]
+    },
+    "Technical": {
+      "video_id": "iX8g4LqF8p8",
+      "title": "7 Authentication Concepts Every Developer Should Know",
+      "total_chunks": 20,
+      "questions": [
+        {
+          "id": "tech_1",
+          "type": "exact_keyword",
+          "question": "Why is basic authentication considered insecure when sending credentials?",
+          "relevant_chunk_ids": [3, 4],
+          "reference_answer": "Basic authentication sends credentials encoded in base64 without built-in encryption."
+        },
+        {
+          "id": "tech_2",
+          "type": "exact_keyword",
+          "question": "Why are JWTs considered stateless compared to database session lookups?",
+          "relevant_chunk_ids": [11, 12],
+          "reference_answer": "JWTs are digitally signed and contain payload claims, allowing servers to verify them locally without querying a database."
+        },
+        {
+          "id": "tech_3",
+          "type": "paraphrased",
+          "question": "What mechanism protects against cross-site scripting stealing auth tokens in the browser?",
+          "relevant_chunk_ids": [13],
+          "reference_answer": "Storing tokens inside HTTP-only, secure cookies prevents malicious JavaScript from accessing credentials."
+        },
+        {
+          "id": "tech_4",
+          "type": "paraphrased",
+          "question": "How can third-party services access files without exposing user passwords?",
+          "relevant_chunk_ids": [14, 15],
+          "reference_answer": "OAuth 2.0 authorization grants scoped access tokens without revealing raw user credentials."
+        }
+      ]
+    },
+    "Conversational": {
+      "video_id": "Gfr50f6ZBvo",
+      "title": "Demis Hassabis: DeepMind & AI Superintelligence (Lex Fridman)",
+      "total_chunks": 141,
+      "questions": [
+        {
+          "id": "conv_1",
+          "type": "exact_keyword",
+          "question": "What was the significance of AlphaFold in solving the protein folding problem?",
+          "relevant_chunk_ids": [25, 26, 27],
+          "reference_answer": "AlphaFold predicted 3D structures of proteins directly from amino acid sequences, solving a 50-year-old biological challenge."
+        },
+        {
+          "id": "conv_2",
+          "type": "exact_keyword",
+          "question": "How did playing chess and board games influence Demis Hassabis's approach to AI?",
+          "relevant_chunk_ids": [2, 3, 4],
+          "reference_answer": "Playing chess taught him planning, intuition, and reinforcement learning strategies that inspired AlphaGo."
+        },
+        {
+          "id": "conv_3",
+          "type": "paraphrased",
+          "question": "What computational principles are needed to bridge artificial systems towards general human cognition?",
+          "relevant_chunk_ids": [12, 13, 14],
+          "reference_answer": "Integrating neural representation learning with planning, world models, and episodic memory mechanisms."
+        },
+        {
+          "id": "conv_4",
+          "type": "paraphrased",
+          "question": "Why is scientific discovery considered the primary long-term mission for DeepMind's models?",
+          "relevant_chunk_ids": [28, 29, 30],
+          "reference_answer": "Using AI as a meta-tool to accelerate breakthroughs in physics, biology, and materials science to benefit humanity."
+        }
+      ]
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import urllib.request
 import threading
 from typing import Optional, List, Dict, Any
@@ -321,9 +322,12 @@ def load_video(req: LoadVideoRequest):
     except OSError:
         _INDEXING_STATUS[video_id] = {"video_id": video_id, "status": "failed", "message": "Storage is unavailable."}
         raise HTTPException(status_code=503, detail="Index storage is temporarily unavailable.")
-    except Exception:
-        _INDEXING_STATUS[video_id] = {"video_id": video_id, "status": "failed", "message": "Video processing failed."}
-        raise HTTPException(status_code=500, detail="Video processing failed. Please retry.")
+    except Exception as exc:
+        print(f"[ERROR in /api/video/load] {type(exc).__name__}: {exc}")
+        import traceback
+        traceback.print_exc()
+        _INDEXING_STATUS[video_id] = {"video_id": video_id, "status": "failed", "message": str(exc) or "Video processing failed."}
+        raise HTTPException(status_code=500, detail=str(exc) or "Video processing failed. Please retry.")
     finally:
         with _INDEXING_LOCK:
             _INDEXING_ACTIVE.discard(video_id)
